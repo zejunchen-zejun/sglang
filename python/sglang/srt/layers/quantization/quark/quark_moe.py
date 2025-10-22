@@ -42,7 +42,7 @@ def rocm_aiter_fused_moe_impl(
     quant_type: QuantType.No,
     w1_scale: Optional[torch.tensor] = None,
     w2_scale: Optional[torch.tensor] = None,
-    activation: int = ActivationType.SILU.value,
+    activation: int = ActivationType.Silu.value,
     doweight_stage1: bool = False,
 ) -> torch.Tensor:
     return fused_moe(
@@ -67,7 +67,7 @@ def rocm_aiter_fused_moe_fake(
     quant_type: QuantType.No,
     w1_scale: Optional[torch.tensor] = None,
     w2_scale: Optional[torch.tensor] = None,
-    activation: int = ActivationType.SILU.value,
+    activation: int = ActivationType.Silu.value,
     doweight_stage1: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(x)
