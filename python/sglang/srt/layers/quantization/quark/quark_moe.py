@@ -13,6 +13,7 @@ from aiter.utility.fp4_utils import e8m0_shuffle
 from sglang.srt.layers.moe import MoeRunnerConfig
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
 from sglang.srt.utils import get_bool_env_var, is_hip, mxfp_supported, set_weight_attrs
+from sglang.srt.utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -32,6 +33,51 @@ OCP_MX_BLOCK_SIZE = 32
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization import QuarkConfig
 
+def rocm_aiter_fused_moe_impl(
+    x: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    quant_type: QuantType.No,
+    w1_scale: Optional[torch.tensor] = None,
+    w2_scale: Optional[torch.tensor] = None,
+    activation: int = ActivationType.SILU.value,
+    doweight_stage1: bool = False,
+) -> torch.Tensor:
+    return fused_moe(
+        x,
+        w13_weight,
+        w2_weight,
+        topk_weights,
+        topk_ids,
+        quant_type,
+        w1_scale,
+        w2_scale,
+        activation,
+        doweight_stage1
+    )
+
+def rocm_aiter_fused_moe_fake(
+    x: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    quant_type: QuantType.No,
+    w1_scale: Optional[torch.tensor] = None,
+    w2_scale: Optional[torch.tensor] = None,
+    activation: int = ActivationType.SILU.value,
+    doweight_stage1: bool = False,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+direct_register_custom_op(
+    op_name="rocm_aiter_fused_moe",
+    op_func=rocm_aiter_fused_moe_impl,
+    mutates_args=[],
+    fake_impl=rocm_aiter_fused_moe_fake,
+)
 
 class QuarkMoEMethod(FusedMoEMethodBase):
 
@@ -196,7 +242,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             w13_weight = layer.w13_weight
             w2_weight = layer.w2_weight
 
-        output = fused_moe(
+        output = rocm_aiter_fused_moe(
             x,
             w13_weight,
             w2_weight,
