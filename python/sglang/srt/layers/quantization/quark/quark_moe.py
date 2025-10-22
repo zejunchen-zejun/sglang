@@ -65,7 +65,7 @@ def rocm_aiter_fused_moe_impl(
         quant_type,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
-        activation=activation_method,
+        activation=activation,
         doweight_stage1=doweight_stage1,
     )
 
