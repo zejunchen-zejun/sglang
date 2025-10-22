@@ -12,8 +12,14 @@ from aiter.utility.fp4_utils import e8m0_shuffle
 
 from sglang.srt.layers.moe import MoeRunnerConfig
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
-from sglang.srt.utils import get_bool_env_var, is_hip, mxfp_supported, set_weight_attrs
-from sglang.srt.utils import direct_register_custom_op
+from sglang.srt.layers.moe.rocm_moe_utils import ActivationMethod
+from sglang.srt.utils import (
+    get_bool_env_var,
+    is_hip,
+    mxfp_supported,
+    set_weight_attrs,
+    direct_register_custom_op
+)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -42,9 +48,14 @@ def rocm_aiter_fused_moe_impl(
     quant_type: QuantType.No,
     w1_scale: Optional[torch.tensor] = None,
     w2_scale: Optional[torch.tensor] = None,
-    activation: int = ActivationType.Silu.value,
+    activation_method: int = ActivationMethod.SILU.value,
     doweight_stage1: bool = False,
 ) -> torch.Tensor:
+
+    from aiter import ActivationType
+
+    activation = ActivationType(activation_method)
+
     return fused_moe(
         x,
         w13_weight,
@@ -52,10 +63,10 @@ def rocm_aiter_fused_moe_impl(
         topk_weights,
         topk_ids,
         quant_type,
-        w1_scale,
-        w2_scale,
-        activation,
-        doweight_stage1
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        activation=activation_method,
+        doweight_stage1=doweight_stage1,
     )
 
 def rocm_aiter_fused_moe_fake(
@@ -67,7 +78,7 @@ def rocm_aiter_fused_moe_fake(
     quant_type: QuantType.No,
     w1_scale: Optional[torch.tensor] = None,
     w2_scale: Optional[torch.tensor] = None,
-    activation: int = ActivationType.Silu.value,
+    activation_method: int = ActivationMethod.SILU.value,
     doweight_stage1: bool = False,
 ) -> torch.Tensor:
     return torch.empty_like(x)
@@ -251,10 +262,10 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             quant_type=QuantType.per_1x32,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            activation=(
-                ActivationType.Silu
+            activation_method=(
+                ActivationMethod.SILU
                 if moe_runner_config.activation == "silu"
-                else ActivationType.Gelu
+                else ActivationMethod.GELU
             ),
             doweight_stage1=False,
         )
