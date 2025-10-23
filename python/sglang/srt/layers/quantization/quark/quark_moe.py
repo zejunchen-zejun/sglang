@@ -7,7 +7,6 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
-from aiter import ActivationType, QuantType, biased_grouped_topk
 from aiter.fused_moe import fused_moe
 from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -56,13 +55,13 @@ def rocm_aiter_fused_moe_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_type_method: int = QuantTypeMethod.per_1x32.value,
-    w1_scale: Optional[torch.tensor] = None,
-    w2_scale: Optional[torch.tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
     activation_method: int = ActivationMethod.SILU.value,
     doweight_stage1: bool = False,
 ) -> torch.Tensor:
 
-    from aiter import ActivationType
+    from aiter import QuantType, ActivationType
 
     quant_type = QuantType(quant_type_method)
     activation = ActivationType(activation_method)
@@ -87,8 +86,8 @@ def rocm_aiter_fused_moe_fake(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     quant_type_method: int = QuantTypeMethod.per_1x32.value,
-    w1_scale: Optional[torch.tensor] = None,
-    w2_scale: Optional[torch.tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
     activation_method: int = ActivationMethod.SILU.value,
     doweight_stage1: bool = False,
 ) -> torch.Tensor:
