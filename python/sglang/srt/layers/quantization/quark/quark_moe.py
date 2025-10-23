@@ -263,7 +263,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             w13_weight = layer.w13_weight
             w2_weight = layer.w2_weight
 
-        output = rocm_aiter_fused_moe(
+        output = torch.ops.sglang.rocm_aiter_fused_moe(
             x,
             w13_weight,
             w2_weight,
