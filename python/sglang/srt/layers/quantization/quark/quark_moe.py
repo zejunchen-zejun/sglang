@@ -273,9 +273,9 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             activation_method=(
-                ActivationMethod.SILU
+                ActivationMethod.SILU.value
                 if moe_runner_config.activation == "silu"
-                else ActivationMethod.GELU
+                else ActivationMethod.GELU.value
             ),
             doweight_stage1=False,
         )
