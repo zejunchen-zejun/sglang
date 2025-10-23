@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import IntEnum
 import logging
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -20,6 +21,15 @@ from sglang.srt.utils import (
     set_weight_attrs,
     direct_register_custom_op
 )
+
+class QuantTypeMethod(IntEnum):
+    No = 0
+    per_Tensor = 1
+    per_Token = 2
+    per_1x32 = 3
+    per_1x128 = 4
+    per_128x128 = 5
+
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
@@ -45,7 +55,7 @@ def rocm_aiter_fused_moe_impl(
     w2_weight: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    quant_type: QuantType,
+    quant_type_method: int = QuantTypeMethod.per_1x32.value,
     w1_scale: Optional[torch.tensor] = None,
     w2_scale: Optional[torch.tensor] = None,
     activation_method: int = ActivationMethod.SILU.value,
@@ -54,6 +64,7 @@ def rocm_aiter_fused_moe_impl(
 
     from aiter import ActivationType
 
+    quant_type = QuantType(quant_type_method)
     activation = ActivationType(activation_method)
 
     return fused_moe(
@@ -62,7 +73,7 @@ def rocm_aiter_fused_moe_impl(
         w2_weight,
         topk_weights,
         topk_ids,
-        quant_type,
+        quant_type=quant_type,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         activation=activation,
@@ -75,7 +86,7 @@ def rocm_aiter_fused_moe_fake(
     w2_weight: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    quant_type: QuantType,
+    quant_type_method: int = QuantTypeMethod.per_1x32.value,
     w1_scale: Optional[torch.tensor] = None,
     w2_scale: Optional[torch.tensor] = None,
     activation_method: int = ActivationMethod.SILU.value,
@@ -259,7 +270,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             w2_weight,
             topk_weights,
             topk_ids,
-            quant_type=QuantType.per_1x32,
+            quant_type_method=QuantTypeMethod.per_1x32.value,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             activation_method=(
