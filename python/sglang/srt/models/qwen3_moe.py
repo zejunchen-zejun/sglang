@@ -425,16 +425,7 @@ class Qwen3MoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        enable_aiter_qknorm_fused = False
         if _use_aiter:
-            try:
-                from aiter import MRotaryEmbeddingQKNormFused
-                enable_aiter_qknorm_fused = True
-            except ImportError as e:
-                print(f"aiter has no MRotaryEmbeddingQKNormFused class")
-
-        if _use_aiter and enable_aiter_qknorm_fused:
-            # TODO shoud we have this here?
             assert self.k_norm.variance_epsilon == self.q_norm.variance_epsilon
             self.rotary_emb(
                 qkv,
