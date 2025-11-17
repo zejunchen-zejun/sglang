@@ -51,7 +51,7 @@ from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import MRotaryEmbedding, get_rope
+from sglang.srt.layers.rotary_embedding import MRotaryEmbedding, get_rope_wrapper
 from sglang.srt.layers.utils import get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
 from sglang.srt.managers.schedule_batch import global_server_args_dict
@@ -66,7 +66,9 @@ from sglang.srt.models.utils import (
 )
 from sglang.srt.utils import (
     add_prefix,
+    get_bool_env_var,
     is_cuda,
+    is_hip,
     is_flashinfer_available,
     is_non_idle_and_non_empty,
 )
@@ -77,7 +79,14 @@ _is_flashinfer_available = is_flashinfer_available()
 
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
+_is_hip = is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
+if _use_aiter:
+    try:
+        from sglang.srt.layers.rotary_embedding import MRotaryEmbeddingQKNormFused
+    except ImportError as e:
+        print(f"aiter has no MRotaryEmbeddingQKNormFused class")
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
     def __init__(
@@ -349,8 +358,10 @@ class Qwen3MoeAttention(nn.Module):
             reduce_results=False,
             prefix=add_prefix("o_proj", prefix),
         )
+        if _use_aiter and rope_scaling is not None:
+            rope_scaling["try_aiter_rope_fused_qknorm"] = True
 
-        self.rotary_emb = get_rope(
+        self.rotary_emb = get_rope_wrapper(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
@@ -419,22 +430,37 @@ class Qwen3MoeAttention(nn.Module):
             return hidden_states, forward_batch, None
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self._apply_qk_norm(q, k)
-        q, k = self.rotary_emb(
-            positions,
-            q,
-            k,
-            fused_set_kv_buffer_arg=(
-                create_fused_set_kv_buffer_arg(
-                    value=v,
-                    layer=self.attn,
-                    forward_batch=forward_batch,
-                )
-                if enable_fused_set_kv_buffer(forward_batch)
-                and self.compatible_with_fused_kv_buffer
-                else None
-            ),
-        )
+
+
+        if _use_aiter and isinstance(self.rotary_emb, MRotaryEmbeddingQKNormFused):
+            # TODO shoud we have this here?
+            assert self.k_norm.variance_epsilon == self.q_norm.variance_epsilon
+            self.rotary_emb(
+                qkv,
+                self.k_norm.weight,
+                self.q_norm.weight,
+                positions,
+                self.num_heads,
+                self.num_kv_heads,
+                self.k_norm.variance_epsilon,
+            )
+        else:
+            q, k = self._apply_qk_norm(q, k)
+            q, k = self.rotary_emb(
+                positions,
+                q,
+                k,
+                fused_set_kv_buffer_arg=(
+                    create_fused_set_kv_buffer_arg(
+                        value=v,
+                        layer=self.attn,
+                        forward_batch=forward_batch,
+                    )
+                    if enable_fused_set_kv_buffer(forward_batch)
+                    and self.compatible_with_fused_kv_buffer
+                    else None
+                ),
+            )
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
 
