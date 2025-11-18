@@ -353,7 +353,7 @@ class Qwen3MoeAttention(nn.Module):
             prefix=add_prefix("o_proj", prefix),
         )
         if _use_aiter and rope_scaling is not None:
-            rope_scaling["try_aiter_rope_fused_qknorm"] = True
+            rope_scaling["aiter_rope_fused_qknorm"] = True
 
         self.rotary_emb = get_rope_wrapper(
             self.head_dim,
@@ -425,7 +425,7 @@ class Qwen3MoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        if _use_aiter:
+        if _use_aiter and "aiter_rope_fused_qknorm" in self.rope_scaling:
             assert self.k_norm.variance_epsilon == self.q_norm.variance_epsilon
             self.rotary_emb(
                 qkv,
