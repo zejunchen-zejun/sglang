@@ -87,17 +87,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             if _use_aiter:
                 from aiter.ops.shuffle import shuffle_weight
 
-                # Pad weight dimensions to be divisible by 16 for shuffle_weight
-                # This is necessary for vision model weights which may have odd dimensions
-                orig_shape = weight.shape
-                pad_dim0 = (16 - weight.shape[-2] % 16) % 16
-                pad_dim1 = (32 - weight.shape[-1] % 32) % 32
-
-                if pad_dim0 > 0 or pad_dim1 > 0:
-                    weight = torch.nn.functional.pad(
-                        weight, (0, pad_dim1, 0, pad_dim0), mode="constant", value=0
-                    )
-
                 layer.weight = Parameter(
                     shuffle_weight(weight, (16, 16)), requires_grad=False
                 )
