@@ -1,0 +1,70 @@
+name: SGLang Benchmark Workflow
+
+on:
+  pull_request:
+    branches: [ dev/perf ]
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: sglang-mi308-8gpu
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+    
+      - name: Download SGLang Image
+        run: |
+          docker pull rocm/sgl-dev:v0.5.3.post1-rocm700-mi30x-20251011
+    
+      - name: Generate Dockerfile
+        run: |
+          cat <<'EOF' > Dockerfile.mod
+          FROM rocm/sgl-dev:v0.5.3.post1-rocm700-mi30x-20251011
+
+          RUN echo "=== Aiter version BEFORE uninstall ===" && pip show aiter || true
+          RUN pip uninstall -y aiter
+          RUN pip install --upgrade "pybind11>=3.0.1"
+          RUN pip show pybind11
+
+          RUN git clone git@github.com:ROCm/aiter.git /aiter && \
+              cd /aiter && \
+              git checkout dev/perf && \
+              git submodule sync && git submodule update --init --recursive && \
+              PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py install
+
+          RUN echo "=== Aiter version AFTER installation ===" && pip show aiter || true
+
+          RUN echo "=== vLLM version BEFORE uninstall ===" && pip show vllm || true
+
+          git clone -b dev/perf https://github.com/zejunchen-zejun/sglang.git
+          cd sglang
+          pip install --upgrade pip
+          pip install "transformers>=4.57.0"
+          cd sgl-kernel
+          python setup_rocm.py install
+
+          RUN echo "=== vLLM version AFTER installation ===" && pip show vllm || true
+          EOF
+
+      - name: Build Docker image
+        run: |
+          docker build --no-cache -t "sglang_test" -f Dockerfile.mod .
+    
+      - name: Run the container
+        run: |
+          docker run -dt \
+          --device=/dev/dri \
+          --device=/dev/kfd \
+          --device /dev/fuse \
+          --cap-add SYS_ADMIN \
+          --privileged \
+          --shm-size=128G \
+          --user root \
+          --group-add "$(getent group render | cut -d: -f3)" \
+          --group-add "$(getent group video | cut -d: -f3)" \
+          -v "${GITHUB_WORKSPACE}:/workspace" \
+          -v /models:/models \
+          -w /workspace \
+          --name "sglang_test" \
+          sglang_test
+        
