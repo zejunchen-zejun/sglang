@@ -153,9 +153,7 @@ class RMSNorm(CustomOp):
                 residual_out = torch.empty_like(x)
                 output = torch.empty_like(x)
                 fused_add_rms_norm(
-                    output,
                     x,
-                    residual_out,
                     residual,
                     self.weight.data,
                     self.variance_epsilon,

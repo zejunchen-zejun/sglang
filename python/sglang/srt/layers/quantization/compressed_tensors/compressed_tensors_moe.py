@@ -46,6 +46,7 @@ from sglang.srt.layers.quantization.utils import (
 )
 from sglang.srt.utils import (
     get_bool_env_var,
+    get_compiler_backend,
     get_int_env_var,
     is_cpu,
     is_cuda,
@@ -390,15 +391,17 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
                 # 3. concate
                 padded_w13_wight = torch.cat([part1_padded, part2_padded], dim=1)
-
+                
                 layer.w13_weight = torch.nn.Parameter(
                     shuffle_weight(padded_w13_wight, (16, 16)),
                     requires_grad=False,
                 )
                 torch.cuda.empty_cache()
+                
                 padded_w2_wight = F.pad(
                     layer.w2_weight.data, (0, pad_size, 0, 0, 0, 0), "constant", 0
                 )
+                
                 layer.w2_weight = torch.nn.Parameter(
                     shuffle_weight(padded_w2_wight, (16, 16)),
                     requires_grad=False,
