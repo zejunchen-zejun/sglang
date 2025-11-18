@@ -368,18 +368,23 @@ class VisionAiterAttention(nn.Module):
         seq_len: int,
         **kwargs,
     ) -> torch.Tensor:
-        if cu_seqlens is None:
-            cu_seqlens = _get_cu_seqlens_for_shape(bsz, seq_len, device=q.device)
-        elif isinstance(cu_seqlens, SingletonCache):
-            if cu_seqlens.empty():
-                cu_seqlens.set_data(
-                    _get_cu_seqlens_for_shape(bsz, seq_len, device=q.device)
-                )
-            cu_seqlens = cu_seqlens.get_data()
+        vision_forward_metadata = kwargs.get("vision_forward_metadata", None)
+        if vision_forward_metadata is None:
+            if cu_seqlens is None:
+                cu_seqlens = _get_cu_seqlens_for_shape(bsz, seq_len, device=q.device)
+            elif isinstance(cu_seqlens, SingletonCache):
+                if cu_seqlens.empty():
+                    cu_seqlens.set_data(
+                        _get_cu_seqlens_for_shape(bsz, seq_len, device=q.device)
+                    )
+                cu_seqlens = cu_seqlens.get_data()
 
-        cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
-        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-        max_seqlen = seq_lens.max().item()
+            cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(q.device)
+            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+            max_seqlen = seq_lens.max().item()
+        else:
+            cu_seqlens = vision_forward_metadata.cu_seqlens
+            max_seqlen = vision_forward_metadata.max_seqlen
 
         return self.flash_attn_varlen_func(
             q=q,
