@@ -48,7 +48,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --no-cache -t "sglang_test" -f Dockerfile.mod .
+          docker build --no-cache --network=host -t "sglang_test" -f Dockerfile.mod .
     
       - name: Run the container
         run: |
