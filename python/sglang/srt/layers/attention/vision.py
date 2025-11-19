@@ -59,6 +59,12 @@ ROTARY_EMBED_CLASSES = {
 
 
 @dataclasses.dataclass
+class VisionForwardMetadata:
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+
+
+@dataclasses.dataclass
 class SingletonCache:
     data: Any = None
 
@@ -581,6 +587,28 @@ class VisionAttention(nn.Module):
             prefix=add_prefix("proj", prefix),
         )
 
+    def init_vision_forward_metadata(self, grid_thw, pixel_values):
+        cu_seqlens = torch.cat(
+            [
+                torch.tensor([0], device=grid_thw.device),
+                (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).cumsum(dim=0),
+            ]
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+
+        cu_seqlens = cu_seqlens.to(dtype=torch.int32).to(pixel_values.device)
+        seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+        max_seqlen = seq_lens.max().item()
+
+        self.vision_forward_metadata = VisionForwardMetadata(
+            cu_seqlens,
+            max_seqlen,
+        )
+        return self.vision_forward_metadata
+
+    def set_vision_forward_metadata(self, vision_forward_metadata):
+        self.vision_forward_metadata = vision_forward_metadata
+
     def _determine_attention_backend(self, passed_backend: Optional[str]) -> str:
         """Decide the multimodal attention backend string.
 
@@ -730,6 +758,7 @@ class VisionAttention(nn.Module):
             seq_len=s,
             cu_seqlens=cu_seqlens,
             attention_mask=attention_mask,
+            vision_forward_metadata=self.vision_forward_metadata,
         )
 
         assert output.dim() == 3, output.shape

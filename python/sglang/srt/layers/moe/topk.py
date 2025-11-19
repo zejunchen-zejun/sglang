@@ -212,8 +212,8 @@ class TopK(CustomOp):
         quant_config: Optional[QuantizationConfig] = None,
         routed_scaling_factor: Optional[float] = None,
         apply_routed_scaling_factor_on_output: Optional[bool] = False,
-        output_format: Optional[TopKOutputFormat] = None,
         fused_shared_experts_scaling_factor: Optional[float] = None,
+        output_format: Optional[TopKOutputFormat] = None,
     ):
         # NOTE: scoring_func is not used for now, but we keep it for future use
         # see https://github.com/sgl-project/sglang/pull/4505 for more details
@@ -819,6 +819,7 @@ def select_experts(
     apply_routed_scaling_factor_on_output = (
         topk_config.apply_routed_scaling_factor_on_output
     )
+
     fused_shared_experts_scaling_factor = (
         topk_config.fused_shared_experts_scaling_factor
     )

@@ -20,6 +20,7 @@ from typing import Callable, Iterable, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from transformers.activations import ACT2FN
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
@@ -681,6 +682,15 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         image_grid_thw = torch.concat([item.image_grid_thw for item in items], dim=0)
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert image_grid_thw.dim() == 2, image_grid_thw.dim()
+        # remove if _use_aiter:
+        for i, block in enumerate(self.visual.blocks):
+            if i == 0:
+                vision_forward_metadata = block.attn.init_vision_forward_metadata(
+                    image_grid_thw, pixel_values
+                )
+            else:
+                block.attn.set_vision_forward_metadata(vision_forward_metadata)
+
         image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
         return image_embeds
 
@@ -692,6 +702,15 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         video_grid_thw = torch.concat([item.video_grid_thw for item in items], dim=0)
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert video_grid_thw.dim() == 2, video_grid_thw.dim()
+        # remove if _use_aiter:
+        for i, block in enumerate(self.visual.blocks):
+            if i == 0:
+                vision_forward_metadata = block.attn.init_vision_forward_metadata(
+                    video_grid_thw, pixel_values
+                )
+            else:
+                    block.attn.set_vision_forward_metadata(vision_forward_metadata)
+
         video_embeds = self.visual(pixel_values, grid_thw=video_grid_thw)
         return video_embeds
 
