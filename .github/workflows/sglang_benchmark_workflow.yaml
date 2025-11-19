@@ -68,3 +68,10 @@ jobs:
           --name "sglang_test" \
           sglang_test
         
+      - name: Launch the server
+        timeout-minutes: 120
+        run: |
+          set -ex
+          sed -i 's/ci_sglang/sglang_test/g' scripts/ci/amd_ci_exec.sh
+          bash scripts/ci/amd_ci_exec.sh pip show aiter || true
+          bash scripts/ci/amd_ci_exec.sh lauch_qwen3vl_fp8_ptpc.sh
