@@ -41,8 +41,8 @@ jobs:
           RUN echo "=== SGLang version BEFORE uninstall ===" && pip show sglang || true
 
           RUN pip uninstall -y sglang
-          RUN git clone -b dev/perf https://github.com/zejunchen-zejun/sglang.git /sglang && \
-              cd /sglang && \
+          RUN git clone -b dev/perf https://github.com/zejunchen-zejun/sglang.git /sglang-checkout && \
+              cd /sglang-checkout && \
               pip install --upgrade pip && \
               pip install "transformers>=4.57.0" && \
               cd sgl-kernel && \
@@ -73,7 +73,6 @@ jobs:
 
           echo "Starting container: sglang_test:ci"
           docker run -dt --user root --device=/dev/kfd $DEVICE_FLAG \
-          -v "/sglang:/sglang-checkout" \
           --ipc=host --group-add video \
           --shm-size 32g \
           --cap-add=SYS_PTRACE \
@@ -82,6 +81,10 @@ jobs:
           -w /sglang-checkout \
           --name sglang_test \
           sglang_test:ci
+
+      - name: Show container logs
+        run: |
+          docker exec -it sglang_test bash -c "ls --all /sglang-checkout /models /sglang"
 
       - name: Launch the server
         timeout-minutes: 120
