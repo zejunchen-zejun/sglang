@@ -7,8 +7,7 @@ EP=${3:-8}
 
 echo
 echo "========== LAUNCHING SERVER ========"
-export NCCL_DEBUG=INFO
-python3 -m sglang.launch_server \
+NCCL_DEBUG=INFO python3 -m sglang.launch_server \
     --model-path ${model} \
     --host localhost \
     --port 9000 \
