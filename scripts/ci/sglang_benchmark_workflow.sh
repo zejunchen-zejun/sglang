@@ -6,7 +6,8 @@ echo "launching ${model}"
 echo "TP=${TP}"
 echo "EP=${EP}"
 
-echo "Launching server"
+echo
+echo "========== LAUNCHING SERVER ========"
 python3 -m sglang.launch_server \
     --model-path ${model} \
     --host localhost \
@@ -22,10 +23,30 @@ python3 -m sglang.launch_server \
     2>&1 | tee log.server.log &
 
 
-echo "Sleeping for 60 seconds"
-sleep 60
-echo "Testing server"
+echo
+echo "========== WAITING FOR SERVER TO BE READY ========"
+max_retries=60
+retry_interval=60
+for ((i=1; i<=max_retries; i++)); do
+    if curl -s http://localhost:9000/v1/completions -o /dev/null; then
+        echo "SGLang server is up."
+        break
+    fi
+    echo "Waiting for SGLang server to be ready... ($i/$max_retries)"
+    sleep $retry_interval
+done
+
+if ! curl -s http://localhost:9000/v1/completions -o /dev/null; then
+    echo "SGLang server did not start after $((max_retries * retry_interval)) seconds."
+    kill $vllm_pid
+    exit 1
+fi
+
+echo
+echo "========== TESTING SERVER ========"
+echo "Downloading test image"
 wget https://sf-maas-uat-prod.oss-cn-shanghai.aliyuncs.com/dog.png
+echo "Testing server with test image"
 curl --request POST \
     --url "http://localhost:9000/v1/chat/completions" \
     --header "Content-Type: application/json" \
