@@ -43,17 +43,13 @@ jobs:
 
           RUN echo "=== Aiter version AFTER installation ===" && pip show aiter || true
 
-          RUN echo "=== SGLang version BEFORE uninstall ===" && pip show sglang || true
-
-          RUN pip uninstall -y sglang
           RUN git clone -b dev/perf https://github.com/zejunchen-zejun/sglang.git /sglang-checkout && \
               cd /sglang-checkout && \
               pip install --upgrade pip && \
               pip install "transformers>=4.57.0" && \
               cd sgl-kernel && \
               python setup_rocm.py install
-
-          RUN echo "=== SGLang version AFTER installation ===" && pip show sglang || true
+          
           EOF
 
       - name: Show dockerfile
