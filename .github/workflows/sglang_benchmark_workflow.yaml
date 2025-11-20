@@ -75,7 +75,7 @@ jobs:
           echo "Starting container: sglang_test:ci"
           docker run -dt --user root --device=/dev/kfd $DEVICE_FLAG \
           --ipc=host --group-add video \
-          --shm-size 32g \
+          --shm-size 1g \
           --cap-add=SYS_PTRACE \
           -v /models:/models \
           --security-opt seccomp=unconfined \
