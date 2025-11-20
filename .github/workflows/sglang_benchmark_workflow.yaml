@@ -57,7 +57,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --no-cache --network=host -t "sglang_test" -f Dockerfile.mod .
+          docker build --no-cache --network=host -t "sglang_test:ci" -f Dockerfile.mod .
     
 
       - name: Start CI container
@@ -71,7 +71,7 @@ jobs:
             DEVICE_FLAG="--device /dev/dri"
           fi
 
-          echo "Starting container: sglang_aiter_test:ci"
+          echo "Starting container: sglang_test:ci"
           docker run -dt --user root --device=/dev/kfd $DEVICE_FLAG \
           -v "${GITHUB_WORKSPACE:-$PWD}/sglang:/sglang-checkout" \
           --ipc=host --group-add video \
@@ -80,8 +80,8 @@ jobs:
           -v /models:/models \
           --security-opt seccomp=unconfined \
           -w /sglang-checkout \
-          --name sglang_aiter_test \
-          sglang_aiter_test:ci
+          --name sglang_test \
+          sglang_test:ci
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
@@ -93,8 +93,7 @@ jobs:
           bash scripts/ci/amd_ci_exec.sh pip show aiter || true
           bash scripts/ci/amd_ci_exec.sh lauch_qwen3vl_fp8_ptpc.sh
 
-      - name: Stop the container
+      - name: Clean Up
         if: always()
-        run: |
-          docker stop sglang_test
-          docker rm sglang_test
+        run:
+          docker exec -u root sglang_test bash -c "rm -rf /sglang-checkout/sgl-kernel; rm -rf /sglang-checkout/python"
