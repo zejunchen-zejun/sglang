@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-model=${1}
-TP=${2}
-EP=${3}
+model=${1:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
+TP=${2:-8}
+EP=${3:-8}
 
 echo
 echo "========== LAUNCHING SERVER ========"
