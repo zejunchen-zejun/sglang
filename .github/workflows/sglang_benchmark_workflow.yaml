@@ -73,7 +73,7 @@ jobs:
 
           echo "Starting container: sglang_test:ci"
           docker run -dt --user root --device=/dev/kfd $DEVICE_FLAG \
-          -v "${GITHUB_WORKSPACE:-$PWD}/sglang:/sglang-checkout" \
+          -v "/sglang:/sglang-checkout" \
           --ipc=host --group-add video \
           --shm-size 32g \
           --cap-add=SYS_PTRACE \
@@ -82,8 +82,6 @@ jobs:
           -w /sglang-checkout \
           --name sglang_test \
           sglang_test:ci
-        env:
-          GITHUB_WORKSPACE: ${{ github.workspace }}
 
       - name: Launch the server
         timeout-minutes: 120
