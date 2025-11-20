@@ -94,7 +94,7 @@ jobs:
           sed -i 's/ci_sglang/sglang_test/g' scripts/ci/amd_ci_exec.sh
           docker exec sglang_test bash -c "ls -all"
           docker exec sglang_test bash -c "pwd"
-          docker exec sglang_test bash -c "cd evaluation && launch_qwen3vl_fp8_ptpc.sh"
+          docker exec sglang_test bash -c "cd evaluation && bash launch_qwen3vl_fp8_ptpc.sh"
 
       - name: Clean Up
         if: always()
