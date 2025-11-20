@@ -1,4 +1,4 @@
-model=/models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic
+model=${1:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
 TP=8
 EP=8
 
