@@ -43,7 +43,7 @@ jobs:
 
           RUN echo "=== Aiter version AFTER installation ===" && pip show aiter || true
 
-          RUN git clone -b dev/perf https://github.com/zejunchen-zejun/sglang.git /sglang-checkout && \
+          RUN git clone -b enable_sglang_ci https://github.com/zejunchen-zejun/sglang.git /sglang-checkout && \
               cd /sglang-checkout && \
               pip install --upgrade pip && \
               pip install "transformers>=4.57.0" && \
