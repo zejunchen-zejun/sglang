@@ -59,24 +59,32 @@ jobs:
         run: |
           docker build --no-cache --network=host -t "sglang_test" -f Dockerfile.mod .
     
-      - name: Run the container
+
+      - name: Start CI container
         run: |
-          docker run -dt \
-          --device=/dev/dri \
-          --device=/dev/kfd \
-          --device /dev/fuse \
-          --cap-add SYS_ADMIN \
-          --privileged \
-          --shm-size=128G \
-          --user root \
-          --group-add "$(getent group render | cut -d: -f3)" \
-          --group-add "$(getent group video | cut -d: -f3)" \
-          -v "${GITHUB_WORKSPACE}:/workspace" \
+          echo "Clean up containers..."
+          docker ps -aq -f name=sglang_test | xargs -r docker stop | xargs -r docker rm
+
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+
+          echo "Starting container: sglang_aiter_test:ci"
+          docker run -dt --user root --device=/dev/kfd $DEVICE_FLAG \
+          -v "${GITHUB_WORKSPACE:-$PWD}/sglang:/sglang-checkout" \
+          --ipc=host --group-add video \
+          --shm-size 32g \
+          --cap-add=SYS_PTRACE \
           -v /models:/models \
-          -w /workspace \
-          --name "sglang_test" \
-          sglang_test
-        
+          --security-opt seccomp=unconfined \
+          -w /sglang-checkout \
+          --name sglang_aiter_test \
+          sglang_aiter_test:ci
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
       - name: Launch the server
         timeout-minutes: 120
         run: |
@@ -84,3 +92,9 @@ jobs:
           sed -i 's/ci_sglang/sglang_test/g' scripts/ci/amd_ci_exec.sh
           bash scripts/ci/amd_ci_exec.sh pip show aiter || true
           bash scripts/ci/amd_ci_exec.sh lauch_qwen3vl_fp8_ptpc.sh
+
+      - name: Stop the container
+        if: always()
+        run: |
+          docker stop sglang_test
+          docker rm sglang_test
