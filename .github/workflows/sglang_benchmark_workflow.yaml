@@ -19,7 +19,7 @@ jobs:
       - name: Download SGLang Image
         run: |
           for i in {1..3}; do
-            docker pull rocm/sgl-dev:v0.5.3.post1-rocm700-mi30x-20251011 && break || {
+            docker pull rocm/ali-private:ubuntu22.04_rocm7.0.1_sglang_128a20_20251119 && break || {
               echo "docker pull failed, retrying ($i/3)..."
               sleep 5
             }
