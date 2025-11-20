@@ -16,6 +16,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
     
+      - name: Docker Login
+        run: |
+          docker login -u rocmshared -p ${{ secrets.DOCKER_PASSWORD }}
+
       - name: Download SGLang Image
         run: |
           for i in {1..3}; do
@@ -28,7 +32,7 @@ jobs:
       - name: Generate Dockerfile
         run: |
           cat <<'EOF' > Dockerfile.mod
-          FROM rocm/sgl-dev:v0.5.3.post1-rocm700-mi30x-20251011
+          FROM rocm/ali-private:ubuntu22.04_rocm7.0.1_sglang_128a20_20251119
 
           RUN echo "=== Aiter version BEFORE uninstall ===" && pip show aiter || true
           RUN pip uninstall -y aiter
