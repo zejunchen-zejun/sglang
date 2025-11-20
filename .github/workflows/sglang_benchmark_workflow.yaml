@@ -84,7 +84,7 @@ jobs:
 
       - name: Show container logs
         run: |
-          docker exec -it sglang_test bash -c "ls --all /sglang-checkout /models /sglang"
+          docker exec sglang_test bash -c "ls --all /sglang-checkout /models /sglang"
 
       - name: Launch the server
         timeout-minutes: 120
