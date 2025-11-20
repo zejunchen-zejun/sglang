@@ -84,6 +84,10 @@ jobs:
           --name sglang_test \
           sglang_test:ci
 
+      - name: Show /dev/shm size
+        run: |
+          df -h /dev/shm
+
       - name: Launch the server
         timeout-minutes: 120
         run: |
