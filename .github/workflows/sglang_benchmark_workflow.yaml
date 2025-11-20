@@ -86,7 +86,7 @@ jobs:
 
       - name: Show /dev/shm size
         run: |
-          df -h /dev/shm
+          docker exec sglang_test bash -c "df -h /dev/shm"
 
       - name: Launch the server
         timeout-minutes: 120
