@@ -90,7 +90,7 @@ jobs:
           sed -i 's/ci_sglang/sglang_test/g' scripts/ci/amd_ci_exec.sh
           docker exec sglang_test bash -c "ls -all"
           docker exec sglang_test bash -c "pwd"
-          docker exec sglang_test bash -c "cd scripts/ci && bash sglang_benchmark_workflow.sh /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
+          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
 
       - name: Clean Up
         if: always()
