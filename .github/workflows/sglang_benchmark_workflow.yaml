@@ -46,6 +46,10 @@ jobs:
           RUN echo "=== vLLM version AFTER installation ===" && pip show vllm || true
           EOF
 
+      - name: Show dockerfile
+        run: |
+          cat Dockerfile.mod 
+          
       - name: Build Docker image
         run: |
           docker build --no-cache --network=host -t "sglang_test" -f Dockerfile.mod .
