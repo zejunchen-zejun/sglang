@@ -1,10 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+
 model=${1}
 TP=${2}
 EP=${3}
-
-echo "launching ${model}"
-echo "TP=${TP:-8}"
-echo "EP=${EP:-8}"
 
 echo
 echo "========== LAUNCHING SERVER ========"
@@ -20,7 +19,6 @@ python3 -m sglang.launch_server \
     --disable-radix-cache \
     --max-prefill-tokens 32768 \
     --cuda-graph-max-bs 128 \
-
 
 echo
 echo "========== WAITING FOR SERVER TO BE READY ========"
