@@ -5,6 +5,10 @@ model=${1:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
 TP=${2:-8}
 EP=${3:-8}
 
+export SGLANG_TORCH_PROFILER_DIR=./
+export SGLANG_PROFILE_WITH_STACK=1
+export SGLANG_PROFILE_RECORD_SHAPES=1
+
 echo
 echo "========== LAUNCHING SERVER ========"
 python3 -m sglang.launch_server \
@@ -72,3 +76,18 @@ curl --request POST \
         "top_k": 1,
         "max_tokens": 100
     }'
+
+
+echo
+echo "========== VISION MODEL EVALUATION ========"
+python3 benchmark/mmmu/bench_sglang.py --port 9000 --concurrency 16 | tee vision_model_evaluation_${model}_TP${TP}_${EP}.log
+
+exit_code=$?
+if [ $exit_code -eq 0 ]; then
+    echo
+    echo "========== SGLANG BENCHMARK COMPLETED SUCCESSFULLY =========="
+else
+    echo
+    echo "========== SGLANG BENCHMARK FAILED WITH EXIT CODE $exit_code =========="
+    exit $exit_code
+fi
