@@ -18,7 +18,7 @@ python3 -m sglang.launch_server \
     --mem-fraction-static 0.6 \
     --disable-radix-cache \
     --max-prefill-tokens 32768 \
-    --cuda-graph-max-bs 128 \
+    --cuda-graph-max-bs 128 &
 
 sglang_pid=$!
 echo
