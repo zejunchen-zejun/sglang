@@ -138,7 +138,6 @@ def load_fused_expert_weights(
                 shard_id,
                 expert_id,
             )
-<<<<<<< HEAD
     else:
         experts_per_ep = num_experts // ep_size
         start_expert = ep_rank * experts_per_ep
