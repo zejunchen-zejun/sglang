@@ -49,7 +49,7 @@ curl --request POST \
     --url "http://localhost:9000/v1/chat/completions" \
     --header "Content-Type: application/json" \
     --data '{
-        "model": "/data/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/",
+        "model": "/models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/",
         "messages": [
             {
             "role": "user",
@@ -57,7 +57,7 @@ curl --request POST \
                 {
                 "type": "image_url",
                 "image_url": {
-                    "url": "/workspace/my_sgl/sglang/evaluation/dog.png"
+                    "url": "dog.png"
                 }
                 },
                 {
