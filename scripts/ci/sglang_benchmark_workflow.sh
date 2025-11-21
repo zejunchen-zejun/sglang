@@ -7,7 +7,7 @@ EP=${3:-8}
 
 echo
 echo "========== LAUNCHING SERVER ========"
-NCCL_DEBUG=INFO python3 -m sglang.launch_server \
+python3 -m sglang.launch_server \
     --model-path ${model} \
     --host localhost \
     --port 9000 \
@@ -20,6 +20,7 @@ NCCL_DEBUG=INFO python3 -m sglang.launch_server \
     --max-prefill-tokens 32768 \
     --cuda-graph-max-bs 128 \
 
+sglang_pid=$!
 echo
 echo "========== WAITING FOR SERVER TO BE READY ========"
 max_retries=60
@@ -35,7 +36,7 @@ done
 
 if ! curl -s http://localhost:9000/v1/completions -o /dev/null; then
     echo "SGLang server did not start after $((max_retries * retry_interval)) seconds."
-    kill $vllm_pid
+    kill $sglang_pid
     exit 1
 fi
 
