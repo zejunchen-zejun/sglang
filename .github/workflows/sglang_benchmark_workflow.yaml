@@ -16,9 +16,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
     
-      #- name: Docker Login
-      #  run: |
-      #    docker login -u rocmshared -p ${{ secrets.DOCKER_PASSWORD }}
+      - name: Docker Login
+        run: |
+          docker login -u rocmshared -p ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Download SGLang Image
         run: |
