@@ -52,7 +52,7 @@ jobs:
               pip install --upgrade pip && \
               pip install "transformers>=4.57.0" && \
               cd sgl-kernel && \
-              python setup_rocm.py install
+              python3 setup_rocm.py install
           
           EOF
 
