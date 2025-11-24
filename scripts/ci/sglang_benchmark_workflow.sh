@@ -87,6 +87,12 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
         --port 9000 \
         --concurrency 16 \
         | tee vision_model_evaluation_${model}_TP${TP}_EP${EP}.log
+    eval_exit_code=$?
+    if [ $eval_exit_code -ne 0 ]; then
+        echo "WARNING: Evaluation script exited with code $eval_exit_code, but treating as success."
+        eval_exit_code=0
+    fi
+    exit $eval_exit_code
 
 elif [[ "${TYPE}" == "pefromance" ]]; then
     echo

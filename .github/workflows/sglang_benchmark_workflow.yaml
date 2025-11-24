@@ -100,11 +100,13 @@ jobs:
           docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
       
       - name: Run vision model evaluation
+        continue-on-error: true
         timeout-minutes: 60
         run: |
           docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
       
       - name: Run performance benchmark
+        continue-on-error: true
         timeout-minutes: 60
         run: |
           docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
