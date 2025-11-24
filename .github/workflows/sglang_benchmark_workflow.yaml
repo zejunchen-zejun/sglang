@@ -94,13 +94,20 @@ jobs:
           docker exec sglang_test bash -c "df -h /dev/shm"
 
       - name: Launch the server
-        timeout-minutes: 120
+        timeout-minutes: 60
         run: |
           set -ex
-          sed -i 's/ci_sglang/sglang_test/g' scripts/ci/amd_ci_exec.sh
-          docker exec sglang_test bash -c "ls -all"
-          docker exec sglang_test bash -c "pwd"
-          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
+          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
+      
+      - name: Run vision model evaluation
+        timeout-minutes: 60
+        run: |
+          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
+      
+      - name: Run performance benchmark
+        timeout-minutes: 60
+        run: |
+          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
 
       - name: Clean Up
         if: always()
