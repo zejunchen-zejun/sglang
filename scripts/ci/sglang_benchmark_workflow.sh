@@ -3,10 +3,10 @@
 set -euo pipefail
 
 TYPE=${1:-launch}
-model=${2:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
-TP=${3:-8}
-EP=${4:-8}
-EXTRA_ARGS=${5:-}
+model_name=${2:-Qwen3-VL-235B}
+model_path=${3:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
+TP=${4:-8}
+EP=${5:-8}
 
 export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
@@ -15,18 +15,35 @@ export SGLANG_PROFILE_RECORD_SHAPES=1
 if [[ "${TYPE}" == "launch" ]]; then
     echo
     echo "========== LAUNCHING SERVER ========"
-    python3 -m sglang.launch_server \
-        --model-path "${model}" \
-        --host localhost \
-        --port 9000 \
-        --tp-size "${TP}" \
-        --ep-size "${EP}" \
-        --trust-remote-code \
-        --chunked-prefill-size 32768 \
-        --mem-fraction-static 0.6 \
-        --disable-radix-cache \
-        --max-prefill-tokens 32768 \
-        --cuda-graph-max-bs 128 ${EXTRA_ARGS} &
+    if [[ "${model_name}" == "Qwen3-VL-235B" ]]; then
+        python3 -m sglang.launch_server \
+            --model-path "${model_path}" \
+            --host localhost \
+            --port 9000 \
+            --tp-size "${TP}" \
+            --ep-size "${EP}" \
+            --trust-remote-code \
+            --chunked-prefill-size 32768 \
+            --mem-fraction-static 0.6 \
+            --disable-radix-cache \
+            --max-prefill-tokens 32768 \
+            --cuda-graph-max-bs 128 &
+    elif [[ "${model_name}" == "Qwen3-next" ]]; then
+        export SGLANG_USE_AITER=1
+        python3 -m sglang.launch_server \
+            --model-path "${model_path}" \
+            --host localhost \
+            --port 9000 \
+            --tp-size ${TP} \
+            --ep-size ${EP} \
+            --trust-remote-code \
+            --chunked-prefill-size 32768 \
+            --mem-fraction-static 0.85 \
+            --disable-radix-cache \
+            --max-prefill-tokens 32768 \
+            --cuda-graph-max-bs 256 \
+            --page-size 64 \
+            --attention-backend triton &
     sglang_pid=$!
     echo
     echo "========== WAITING FOR SERVER TO BE READY ========"
@@ -88,12 +105,6 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
         --port 9000 \
         --concurrency 16 \
         | tee vision_model_evaluation_${model}_TP${TP}_EP${EP}.log
-    eval_exit_code=$?
-    if [ $eval_exit_code -ne 0 ]; then
-        echo "WARNING: Evaluation script exited with code $eval_exit_code, but treating as success."
-        eval_exit_code=0
-    fi
-    exit $eval_exit_code
 
 elif [[ "${TYPE}" == "performance" ]]; then
     echo

@@ -20,12 +20,10 @@ jobs:
             model_path: /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/
             tp: 8
             ep: 8
-            extra-args: ""
           - model_name: "Qwen3-next"
             model_path: /models/Qwen/Qwen3-Next-80B-A3B-Instruct/
             tp: 4
             ep: 1
-            extra-args: "--chunked-prefill-size 32768 --mem-fraction-static 0.85 --page-size 64 --attention-backend triton"
 
     steps:
       - name: Checkout code
@@ -112,19 +110,19 @@ jobs:
         timeout-minutes: 60
         run: |
           set -ex
-          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch ${{ matrix.model_path }} ${{ matrix.tp }} ${{ matrix.ep }} ${{ matrix.extra-args }}"
+          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch ${{ matrix.model_name }} ${{ matrix.model_path }} ${{ matrix.tp }} ${{ matrix.ep }}"
       
       - name: Run vision model evaluation
         continue-on-error: true
         timeout-minutes: 60
         run: |
-          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation ${{ matrix.model_path }}"
+          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation ${{ matrix.model_name }} ${{ matrix.model_path }}"
       
       - name: Run performance benchmark
         continue-on-error: true
         timeout-minutes: 60
         run: |
-          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance ${{ matrix.model_path }}"
+          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance ${{ matrix.model_name }} ${{ matrix.model_path }}"
 
       - name: Clean Up
         if: always()
