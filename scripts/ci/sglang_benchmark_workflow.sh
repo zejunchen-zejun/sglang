@@ -95,7 +95,7 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
     fi
     exit $eval_exit_code
 
-elif [[ "${TYPE}" == "pefromance" ]]; then
+elif [[ "${TYPE}" == "performance" ]]; then
     echo
     echo "========== STARTING PERFORMANCE BENCHMARK =========="
     python3 -m sglang.bench_serving \
