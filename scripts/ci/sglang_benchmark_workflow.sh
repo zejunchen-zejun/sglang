@@ -28,6 +28,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 128 &
+        sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-next" ]]; then
         export SGLANG_USE_AITER=1
         python3 -m sglang.launch_server \
@@ -44,7 +45,12 @@ if [[ "${TYPE}" == "launch" ]]; then
             --cuda-graph-max-bs 256 \
             --page-size 64 \
             --attention-backend triton &
-    sglang_pid=$!
+        sglang_pid=$!
+    else
+        echo "Unknown model_name: ${model_name}"
+        exit 1
+    fi
+
     echo
     echo "========== WAITING FOR SERVER TO BE READY ========"
     max_retries=60
@@ -104,7 +110,7 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
     python3 benchmark/mmmu/bench_sglang.py \
         --port 9000 \
         --concurrency 16 \
-        | tee vision_model_evaluation_${model}_TP${TP}_EP${EP}.log
+        | tee vision_model_evaluation_${model_name}_TP${TP}_EP${EP}.log
 
 elif [[ "${TYPE}" == "performance" ]]; then
     echo
@@ -118,11 +124,11 @@ elif [[ "${TYPE}" == "performance" ]]; then
         --random-output-len 2000 \
         --max-concurrency 64 \
         --num-prompts 192 \
-        | tee performance_benchmark_${model}_TP${TP}_EP${EP}.log
+        | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
 
 else
     echo "Unknown TYPE: ${TYPE}"
-    echo "Usage: $0 {launch|evaluation|performance} [model] [TP] [EP]"
+    echo "Usage: $0 {launch|evaluation|performance} [model_name] [model_path] [TP] [EP]"
     exit 1
 fi
 
