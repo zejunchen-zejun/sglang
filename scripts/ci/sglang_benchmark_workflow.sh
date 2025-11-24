@@ -6,6 +6,7 @@ TYPE=${1:-launch}
 model=${2:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
 TP=${3:-8}
 EP=${4:-8}
+EXTRA_ARGS=${5:-}
 
 export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
@@ -25,7 +26,7 @@ if [[ "${TYPE}" == "launch" ]]; then
         --mem-fraction-static 0.6 \
         --disable-radix-cache \
         --max-prefill-tokens 32768 \
-        --cuda-graph-max-bs 128 &
+        --cuda-graph-max-bs 128 ${EXTRA_ARGS} &
     sglang_pid=$!
     echo
     echo "========== WAITING FOR SERVER TO BE READY ========"
