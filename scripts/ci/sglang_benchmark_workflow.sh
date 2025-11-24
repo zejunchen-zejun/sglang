@@ -46,8 +46,6 @@ if [[ "${TYPE}" == "launch" ]]; then
         exit 1
     fi
 
-    wait $sglang_pid
-
     echo
     echo "========== TESTING SERVER ========"
     echo "Downloading test image"
