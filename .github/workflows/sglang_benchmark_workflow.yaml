@@ -4,6 +4,11 @@ on:
   pull_request:
     branches: [ dev/perf ]
   workflow_dispatch:
+    inputs:
+      model_list:
+        description: 'Model list to benchmark on MI355 (JSON array format, default: ["Qwen3-VL-235B","Qwen3-next"])'
+        required: false
+        default: '["Qwen3-VL-235B","Qwen3-next"]'
   
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,6 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        model: ${{ fromJson(inputs.model_list) || '["Qwen3-VL-235B","Qwen3-next"]' }} 
         include:
           - model_name: "Qwen3-VL-235B"
             model_path: /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/
