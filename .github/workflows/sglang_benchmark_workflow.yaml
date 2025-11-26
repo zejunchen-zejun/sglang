@@ -117,12 +117,6 @@ jobs:
         timeout-minutes: 60
         run: |
           docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation ${{ matrix.model_name }} ${{ matrix.model_path }}"
-      
-      - name: Run performance benchmark
-        continue-on-error: true
-        timeout-minutes: 60
-        run: |
-          docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance ${{ matrix.model_name }} ${{ matrix.model_path }}"
 
       - name: Clean Up
         if: always()
