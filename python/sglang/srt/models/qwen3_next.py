@@ -309,6 +309,7 @@ class Qwen3GatedDeltaNet(nn.Module):
         else:
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
+
         return projected_states_qkvz, projected_states_ba
 
     def forward(
