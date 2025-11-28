@@ -33,12 +33,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
     
-      - name: Docker Login
-        run: |
-          docker login -u rocmshared -p ${{ secrets.DOCKER_PASSWORD }}
-
       - name: Download SGLang Image
         run: |
+          docker login -u rocmshared -p ${{ secrets.DOCKER_PASSWORD }}
           for i in {1..3}; do
             docker pull rocm/ali-private:ubuntu22.04_rocm7.0.1_sglang_128a20_20251119 && break || {
               echo "docker pull failed, retrying ($i/3)..."
