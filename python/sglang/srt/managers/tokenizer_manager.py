@@ -602,7 +602,10 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             )
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
-                # https://github.com/sgl-project/sglang/pull/14354/files
+                """
+                This change is based on community PR
+                https://github.com/sgl-project/sglang/pull/14354
+                """
                 for item in mm_inputs["mm_items"]:
                     if isinstance(item, MultimodalDataItem):
                         item.set_pad_value()
