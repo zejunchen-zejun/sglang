@@ -20,7 +20,7 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.mem_cache.multimodal_cache import MultiModalCache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.utils import flatten_nested_list, is_npu, print_warning_once
+from sglang.srt.utils import flatten_nested_list, is_npu, print_warning_once, is_cuda_alike
 from sglang.utils import logger
 
 _is_npu = is_npu()
@@ -785,7 +785,8 @@ def tensor_hash(tensor_list) -> int:
             x.flatten() if isinstance(x, torch.Tensor) else x for x in tensor_list
         ]
         tensor = torch.concat(tensor_list)
-    if tensor.is_cuda:
+
+    if is_cuda_alike():
         return gpu_tensor_hash(tensor.cuda())
     tensor = tensor.detach().contiguous()
 
