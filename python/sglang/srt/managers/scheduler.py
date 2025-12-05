@@ -1042,6 +1042,11 @@ class Scheduler(
                         recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
                         break
+                    if isinstance(recv_req, TokenizedGenerateReqInput):
+                        if recv_req.mm_inputs is not None and "mm_items" in recv_req.mm_inputs.keys():
+                            for item in recv_req.mm_inputs["mm_items"]:
+                                if item.feature is not None:
+                                    item.feature = item.feature.to(self.device, non_blocking=True)
                     recv_reqs.append(recv_req)
 
                 while True:
@@ -1105,6 +1110,7 @@ class Scheduler(
                     work_reqs,
                     self.attn_tp_group.rank,
                     self.attn_tp_cpu_group,
+                    self.attn_tp_group.device_group,
                     src=self.attn_tp_group.ranks[0],
                 )
             if self.tp_size != 1:
@@ -1112,6 +1118,7 @@ class Scheduler(
                     control_reqs,
                     self.tp_group.rank,
                     self.tp_cpu_group,
+                    self.tp_group.device_group,
                     src=self.tp_group.ranks[0],
                 )
             recv_reqs = work_reqs + control_reqs
@@ -1120,6 +1127,7 @@ class Scheduler(
                 recv_reqs,
                 self.tp_group.rank,
                 self.tp_cpu_group,
+                self.tp_group.device_group,
                 src=self.tp_group.ranks[0],
             )
 
