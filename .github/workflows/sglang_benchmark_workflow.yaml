@@ -62,7 +62,7 @@ jobs:
           RUN git clone https://github.com/zejunchen-zejun/sglang.git /sglang-checkout && \
               cd /sglang-checkout && \
               git checkout dev/perf && \
-              git rev-parse HEAD \
+              git rev-parse HEAD && \
               pip install --upgrade pip && \
               pip install "transformers>=4.57.0" && \
               cd sgl-kernel && \
