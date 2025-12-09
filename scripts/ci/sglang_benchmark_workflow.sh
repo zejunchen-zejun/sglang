@@ -12,6 +12,13 @@ export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
 export SGLANG_PROFILE_RECORD_SHAPES=1
 
+echo "Dectect TYPE ${TYPE}"
+echo "Detect model_name: ${model_name}"
+echo "Detect model_path ${model_path}"
+echo "Detect TP ${TP}"
+echo "Detect EP ${EP}"
+
+
 if [[ "${TYPE}" == "launch" ]]; then
     echo
     echo "========== LAUNCHING SERVER ========"
