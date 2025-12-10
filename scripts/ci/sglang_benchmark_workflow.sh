@@ -69,7 +69,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --tp-size ${TP} \
             --ep-size ${EP} \
             --trust-remote-code \
-            --mm-attention-backend "aiter_attn"\
+            --mm-attention-backend "aiter_attn" \
             --chunked-prefill-size 32768 \
             --mem-fraction-static 0.85 \
             --disable-radix-cache \
@@ -158,6 +158,10 @@ elif [[ "${TYPE}" == "performance" ]]; then
             --num-prompts 128 \
             --skip-special-tokens \
             | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
+    else
+        echo "Unknown model_name: ${model_name}"
+        exit 1
+    fi
 
 else
     echo "Unknown TYPE: ${TYPE}"
