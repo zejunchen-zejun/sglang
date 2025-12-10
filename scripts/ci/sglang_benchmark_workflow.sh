@@ -60,6 +60,8 @@ if [[ "${TYPE}" == "launch" ]]; then
     elif [[ "${model_name}" == "Qwen3-Omni" ]]; then
         echo "Qwen3-Omni-Server Launch"
         export SGLANG_USE_AITER=1
+        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
+        export SGLANG_VLM_CACHE_SIZE_MB=0
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
@@ -68,11 +70,11 @@ if [[ "${TYPE}" == "launch" ]]; then
             --ep-size ${EP} \
             --trust-remote-code \
             --mm-attention-backend "aiter_attn"\
-            --chunked-prefill-size 16384 \
+            --chunked-prefill-size 32768 \
             --mem-fraction-static 0.85 \
             --disable-radix-cache \
-            --max-prefill-tokens 16384 \
-            --cuda-graph-max-bs 64 \
+            --max-prefill-tokens 32768 \
+            --cuda-graph-max-bs 8 \
             --page-size 64 &
         sglang_pid=$!
     else
@@ -144,16 +146,18 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
 elif [[ "${TYPE}" == "performance" ]]; then
     echo
     echo "========== STARTING PERFORMANCE BENCHMARK =========="
-    python3 -m sglang.bench_serving \
-        --backend sglang-oai-chat \
-        --dataset-name image \
-        --image-count 1 \
-        --image-resolution 800x800 \
-        --random-input-len 1000 \
-        --random-output-len 2000 \
-        --max-concurrency 64 \
-        --num-prompts 192 \
-        | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
+    if [[ "${model_name}" == "Qwen3-Omni" ]]; then
+        python3 -m sglang.bench_serving \
+            --backend sglang-oai-chat \
+            --dataset-name image \
+            --image-count 20 \
+            --image-resolution 960x1280 \
+            --random-input-len 8000 \
+            --random-output-len 500 \
+            --max-concurrency 2 \
+            --num-prompts 128 \
+            --skip-special-tokens \
+            | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
 
 else
     echo "Unknown TYPE: ${TYPE}"
