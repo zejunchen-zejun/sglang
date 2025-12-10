@@ -72,7 +72,10 @@ jobs:
               pip install --upgrade pip && \
               pip install "transformers>=4.57.0" && \
               cd sgl-kernel && \
-              python3 setup_rocm.py install
+              python3 setup_rocm.py install && \
+              cd .. && \
+              rm -rf python/pyproject.toml && mv python/pyproject_other.toml python/pyproject.toml && \
+              pip install -e "python[all_hip]"
           EOF
 
       - name: Show dockerfile
