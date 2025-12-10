@@ -18,7 +18,7 @@ echo "Detect model_name: ${model_name}"
 echo "Detect model_path ${model_path}"
 echo "Detect TP ${TP}"
 echo "Detect EP ${EP}"
-echo "Detect DP ${EP}"
+echo "Detect DP ${DP}"
 
 
 if [[ "${TYPE}" == "launch" ]]; then
@@ -154,6 +154,9 @@ elif [[ "${TYPE}" == "performance" ]]; then
     if [[ "${model_name}" == "Qwen3-Omni" ]]; then
         python3 -m sglang.bench_serving \
             --backend sglang-oai-chat \
+            --host localhost \
+            --port 9000 \
+            --model "${model_path}" \
             --dataset-name image \
             --image-count 20 \
             --image-resolution 960x1280 \
@@ -161,8 +164,9 @@ elif [[ "${TYPE}" == "performance" ]]; then
             --random-output-len 500 \
             --max-concurrency 2 \
             --num-prompts 128 \
+            --flush-cache \
             --skip-special-tokens \
-            | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}_DP${DP}.log
+            2>&1 | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}_DP${DP}.log
     else
         echo "Unknown model_name: ${model_name}"
         exit 1
