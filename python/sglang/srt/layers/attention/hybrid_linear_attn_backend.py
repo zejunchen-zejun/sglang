@@ -274,25 +274,36 @@ class GDNAttnBackend(MambaAttnBackendBase):
         query_start_loc = self.forward_metadata.query_start_loc
         cache_indices = self.forward_metadata.mamba_cache_indices
 
-        mixed_qkv = causal_conv1d_update(
-            mixed_qkv,
-            conv_states,
-            conv_weights,
-            bias,
-            activation,
-            conv_state_indices=cache_indices,
-        )
-
-        query, key, value = torch.split(
-            mixed_qkv,
-            [
-                key_dim // attn_tp_size,
-                key_dim // attn_tp_size,
-                value_dim // attn_tp_size,
-            ],
-            dim=-1,
-        )
-        # Reshape from [l, h*d] to [1, l, h, d]
+        if _is_hip:
+            query, key, value = causal_conv1d_update_split_qkv(
+                mixed_qkv,
+                conv_states,
+                conv_weights,
+                key_dim=key_dim // attn_tp_size,
+                value_dim=value_dim // attn_tp_size,
+                bias=bias,
+                activation=activation,
+                conv_state_indices=cache_indices,
+            )
+        else:
+            mixed_qkv = causal_conv1d_update(
+                mixed_qkv,
+                conv_states,
+                conv_weights,
+                bias,
+                activation,
+                conv_state_indices=cache_indices,
+            )
+            query, key, value = torch.split(
+                mixed_qkv,
+                [
+                    key_dim // attn_tp_size,
+                    key_dim // attn_tp_size,
+                    value_dim // attn_tp_size,
+                ],
+                dim=-1,
+            )
+        
         seq_len = query.shape[0]
         num_heads = query.shape[1] // head_k_dim
         query = query.view(1, seq_len, num_heads, head_k_dim)

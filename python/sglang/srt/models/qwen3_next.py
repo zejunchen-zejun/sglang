@@ -309,6 +309,7 @@ class Qwen3GatedDeltaNet(nn.Module):
         else:
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
+
         return projected_states_qkvz, projected_states_ba
 
     def forward(
@@ -663,7 +664,7 @@ class Qwen3HybridAttentionDecoderLayer(nn.Module):
 
         if self.attn_output_gate:
             if _is_hip:
-                attn_output = fused_sigmoid_mul(gate, attn_output)
+                fused_sigmoid_mul(gate, attn_output, out=attn_output)
             else:
                 attn_output = torch.sigmoid(gate) * attn_output
 

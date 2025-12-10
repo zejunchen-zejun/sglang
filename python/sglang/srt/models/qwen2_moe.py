@@ -216,7 +216,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             if self.shared_expert_gate is not None:
                 if _is_hip:
                     gate_output = self.shared_expert_gate(hidden_states)
-                    shared_output = fused_sigmoid_mul_broadcast(gate_output, shared_output)
+                    fused_sigmoid_mul_broadcast(gate_output, shared_output, out=shared_output)
                 else:
                     shared_output = (
                         F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_output
