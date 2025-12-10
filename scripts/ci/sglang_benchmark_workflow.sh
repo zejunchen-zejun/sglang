@@ -7,6 +7,7 @@ model_name=${2:-Qwen3-VL-235B}
 model_path=${3:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
 TP=${4:-8}
 EP=${5:-8}
+DP=${6:-8}
 
 export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
@@ -17,6 +18,7 @@ echo "Detect model_name: ${model_name}"
 echo "Detect model_path ${model_path}"
 echo "Detect TP ${TP}"
 echo "Detect EP ${EP}"
+echo "Detect DP ${EP}"
 
 
 if [[ "${TYPE}" == "launch" ]]; then
@@ -31,6 +33,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --port 9000 \
             --tp-size "${TP}" \
             --ep-size "${EP}" \
+            --dp-size "${DP}" \
             --trust-remote-code \
             --chunked-prefill-size 32768 \
             --mem-fraction-static 0.6 \
@@ -47,6 +50,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --port 9000 \
             --tp-size ${TP} \
             --ep-size ${EP} \
+            --dp-size ${DP} \
             --trust-remote-code \
             --chunked-prefill-size 32768 \
             --mem-fraction-static 0.85 \
@@ -68,6 +72,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --port 9000 \
             --tp-size ${TP} \
             --ep-size ${EP} \
+            --dp-size ${DP} \
             --trust-remote-code \
             --mm-attention-backend "aiter_attn" \
             --chunked-prefill-size 32768 \
@@ -141,7 +146,7 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
     python3 benchmark/mmmu/bench_sglang.py \
         --port 9000 \
         --concurrency 16 \
-        | tee vision_model_evaluation_${model_name}_TP${TP}_EP${EP}.log
+        | tee vision_model_evaluation_${model_name}_TP${TP}_EP${EP}_DP${DP}.log
 
 elif [[ "${TYPE}" == "performance" ]]; then
     echo
@@ -157,7 +162,7 @@ elif [[ "${TYPE}" == "performance" ]]; then
             --max-concurrency 2 \
             --num-prompts 128 \
             --skip-special-tokens \
-            | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
+            | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}_DP${DP}.log
     else
         echo "Unknown model_name: ${model_name}"
         exit 1
@@ -165,7 +170,7 @@ elif [[ "${TYPE}" == "performance" ]]; then
 
 else
     echo "Unknown TYPE: ${TYPE}"
-    echo "Usage: $0 {launch|evaluation|performance} [model_name] [model_path] [TP] [EP]"
+    echo "Usage: $0 {launch|evaluation|performance} [model_name] [model_path] [TP] [EP] [DP]"
     exit 1
 fi
 

@@ -122,11 +122,11 @@ jobs:
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "Qwen3-VL-235B" ]; then
-            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/ 8 8"
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/ 8 8 1"
           elif [ "$model_name" == "Qwen3-next" ]; then
-            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/Qwen/Qwen3-Next-80B-A3B-Instruct/ 4 1"
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/Qwen/Qwen3-Next-80B-A3B-Instruct/ 4 1 1"
           elif [ "$model_name" == "Qwen3-Omni" ]; then
-            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 2"
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 4 2"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -138,11 +138,11 @@ jobs:
         run: |
           model_name=${{ matrix.model }}
           if [ "$model_name" == "Qwen3-VL-235B" ]; then
-            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/ 8 8"
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/ 8 8 1"
           elif [ "$model_name" == "Qwen3-next" ]; then
-            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/Qwen/Qwen3-Next-80B-A3B-Instruct/ 4 1"
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/Qwen/Qwen3-Next-80B-A3B-Instruct/ 4 1 1"
           elif [ "$model_name" == "Qwen3-Omni" ]; then
-            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 2"
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 4 2"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -154,10 +154,10 @@ jobs:
         run: |
           model_name=${{ matrix.model }}
           if [ "$model_name" == "Qwen3-Omni" ]; then
-            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 2"
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 4 2"
           else
-            echo "Unknown model_name: ${model_name}"
-            exit 1
+            echo "Skip performance benchmark for model_name: ${model_name}"
+            exit 0
           fi
 
       - name: Clean Up
