@@ -636,22 +636,6 @@ def fused_sigmoid_mul(x: torch.Tensor, y: torch.Tensor, out: torch.Tensor = None
     return out
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_N": 128, "BLOCK_H": 128}, num_warps=4, num_stages=2),
-        triton.Config({"BLOCK_N": 64, "BLOCK_H": 256}, num_warps=4, num_stages=2),
-        triton.Config({"BLOCK_N": 64, "BLOCK_H": 512}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 32, "BLOCK_H": 512}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 32, "BLOCK_H": 1024}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 16, "BLOCK_H": 1024}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 16, "BLOCK_H": 2048}, num_warps=8, num_stages=2),
-        
-        triton.Config({"BLOCK_N": 8, "BLOCK_H": 2048}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 4, "BLOCK_H": 2048}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_N": 8, "BLOCK_H": 1024}, num_warps=4, num_stages=2),
-    ],
-    key=["N", "H"],
-)
 @triton.jit
 def _fused_sigmoid_mul_broadcast_kernel(
     X, Y, OUT, N, H, stride_y,
@@ -702,10 +686,16 @@ def fused_sigmoid_mul_broadcast(x: torch.Tensor, y: torch.Tensor, out: torch.Ten
     if out is None:
         out = torch.empty_like(y)
     
-    def grid(META):
-        return (triton.cdiv(N, META["BLOCK_N"]), triton.cdiv(H, META["BLOCK_H"]))
+    # Fixed configuration (faster than autotune in benchmarks)
+    BLOCK_N = 32
+    BLOCK_H = 1024
+    grid = (triton.cdiv(N, BLOCK_N), triton.cdiv(H, BLOCK_H))
 
     _fused_sigmoid_mul_broadcast_kernel[grid](
         x, y, out, N, H, y.stride(0),
+        BLOCK_N=BLOCK_N,
+        BLOCK_H=BLOCK_H,
+        num_warps=8,
+        num_stages=2,
     )
     return out

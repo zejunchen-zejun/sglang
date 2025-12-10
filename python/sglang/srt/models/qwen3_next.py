@@ -663,7 +663,7 @@ class Qwen3HybridAttentionDecoderLayer(nn.Module):
 
         if self.attn_output_gate:
             if _is_hip:
-                attn_output = fused_sigmoid_mul(gate, attn_output)
+                fused_sigmoid_mul(gate, attn_output, out=attn_output)
             else:
                 attn_output = torch.sigmoid(gate) * attn_output
 
