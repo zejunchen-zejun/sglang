@@ -40,11 +40,12 @@ if [[ "${TYPE}" == "launch" ]]; then
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 128 \
-        2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
+            --page-size 64 \
+            2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-next" ]]; then
         export SGLANG_USE_AITER=1
-        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=1
+        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
@@ -61,7 +62,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --page-size 64 \
             --attention-backend triton \
             --max-running-requests 128 \
-        2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
+            2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-Omni" ]]; then
         echo "Qwen3-Omni-Server Launch"
@@ -83,7 +84,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 8 \
             --page-size 64 \
-        2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
+            2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
         sglang_pid=$!
     else
         echo "Unknown model_name: ${model_name}"
