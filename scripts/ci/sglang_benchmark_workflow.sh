@@ -40,7 +40,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 128 \
-            --page-size 64 \
+            --page-size 16 \
             2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-next" ]]; then
