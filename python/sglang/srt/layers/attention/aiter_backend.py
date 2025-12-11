@@ -85,7 +85,6 @@ class AiterAttnBackend(AttentionBackend):
         mapping = getattr(
             model_runner.token_to_kv_pool, "full_attention_layer_id_mapping", None
         )
-
         if isinstance(mapping, dict) and mapping:
             first_full_attn_id = next(iter(mapping.keys()))
         else:
@@ -773,7 +772,6 @@ class AiterAttnBackend(AttentionBackend):
             )
 
             bs0 = forward_batch.batch_size + 1
-
             o = mha_batch_prefill_func(
                 q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
                 k_cache,

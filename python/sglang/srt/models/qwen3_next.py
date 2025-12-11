@@ -663,7 +663,7 @@ class Qwen3HybridAttentionDecoderLayer(nn.Module):
 
         if self.attn_output_gate:
             if _is_hip:
-                attn_output = fused_sigmoid_mul(gate, attn_output)
+                fused_sigmoid_mul(gate, attn_output, out=attn_output)
             else:
                 attn_output = torch.sigmoid(gate) * attn_output
 
@@ -722,6 +722,7 @@ class Qwen3NextModel(nn.Module):
         self.config = config
 
         alt_stream = torch.cuda.Stream() if _is_cuda else None
+        alt_stream = torch.cuda.Stream() if _is_hip else None
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
