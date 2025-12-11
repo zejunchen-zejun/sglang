@@ -75,7 +75,7 @@ jobs:
               python3 setup_rocm.py install && \
               cd .. && \
               rm -rf python/pyproject.toml && mv python/pyproject_other.toml python/pyproject.toml && \
-              pip install -e "python[all_hip]"
+              PYTORCH_ROCM_ARCH="gfx942" pip install -e "python[all_hip]"
           EOF
 
       - name: Show dockerfile

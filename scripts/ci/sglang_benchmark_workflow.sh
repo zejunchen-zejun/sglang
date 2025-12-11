@@ -39,7 +39,8 @@ if [[ "${TYPE}" == "launch" ]]; then
             --mem-fraction-static 0.6 \
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
-            --cuda-graph-max-bs 128 &
+            --cuda-graph-max-bs 128 \
+        2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-next" ]]; then
         export SGLANG_USE_AITER=1
@@ -59,7 +60,8 @@ if [[ "${TYPE}" == "launch" ]]; then
             --cuda-graph-max-bs 256 \
             --page-size 64 \
             --attention-backend triton \
-            --max-running-requests 128 &
+            --max-running-requests 128 \
+        2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-Omni" ]]; then
         echo "Qwen3-Omni-Server Launch"
@@ -80,7 +82,8 @@ if [[ "${TYPE}" == "launch" ]]; then
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 8 \
-            --page-size 64 &
+            --page-size 64 \
+        2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
         sglang_pid=$!
     else
         echo "Unknown model_name: ${model_name}"
