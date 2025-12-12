@@ -469,7 +469,7 @@ def fused_topk(
     topk_softmax(
         topk_weights,
         topk_ids,
-        gating_output,
+        gating_output.to(dtype=torch.float32) if _use_aiter else gating_output,
         renormalize,
     )
 
