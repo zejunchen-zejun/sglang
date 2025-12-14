@@ -464,7 +464,7 @@ class Qwen3MoeAttention(nn.Module):
                     and self.compatible_with_fused_kv_buffer
                     else None
                 ),
-            ) and not self.aiter_enable_fused_set_kv_buffer,
+            ) 
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
 
@@ -477,7 +477,7 @@ class Qwen3MoeAttention(nn.Module):
             save_kv_cache=not (
                 enable_fused_set_kv_buffer(forward_batch)
                 and self.compatible_with_fused_kv_buffer
-            ),
+            ) and not self.aiter_enable_fused_set_kv_buffer,
         )
         output, _ = self.o_proj(attn_output)
         return output
