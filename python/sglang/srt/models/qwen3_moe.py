@@ -468,7 +468,7 @@ class Qwen3MoeAttention(nn.Module):
                     and self.compatible_with_fused_kv_buffer
                     else None
                 ),
-            ) 
+            )
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
 
