@@ -41,7 +41,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 128 \
             --page-size 16 \
-            2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
+            --watchdog-timeout 1200 &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-next" ]]; then
         export SGLANG_USE_AITER=1
@@ -62,13 +62,12 @@ if [[ "${TYPE}" == "launch" ]]; then
             --page-size 64 \
             --attention-backend triton \
             --max-running-requests 128 \
-            2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
+            --watchdog-timeout 1200 &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-Omni" ]]; then
         echo "Qwen3-Omni-Server Launch"
         export SGLANG_USE_AITER=1
         export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
-        export SGLANG_VLM_CACHE_SIZE_MB=0
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
@@ -81,10 +80,10 @@ if [[ "${TYPE}" == "launch" ]]; then
             --chunked-prefill-size 32768 \
             --mem-fraction-static 0.85 \
             --disable-radix-cache \
-            --max-prefill-tokens 32768 \
-            --cuda-graph-max-bs 8 \
-            --page-size 64 \
-            2>&1 | tee launch_server_${model_name}_TP${TP}_EP${EP}_DP${DP}.log &
+            --max-prefill-tokens 16384 \
+            --cuda-graph-max-bs 64 \
+            --page-size 64  \
+            --watchdog-timeout 1200 &
         sglang_pid=$!
     else
         echo "Unknown model_name: ${model_name}"
@@ -112,14 +111,12 @@ if [[ "${TYPE}" == "launch" ]]; then
 
     echo
     echo "========== TESTING SERVER ========"
-    echo "Downloading test image"
-    wget https://sf-maas-uat-prod.oss-cn-shanghai.aliyuncs.com/dog.png
     echo "Testing server with test image"
     curl --request POST \
         --url "http://localhost:9000/v1/chat/completions" \
         --header "Content-Type: application/json" \
         --data '{
-            "model": "${model}",
+            "model": "${model_path}",
             "messages": [
                 {
                 "role": "user",
@@ -127,7 +124,7 @@ if [[ "${TYPE}" == "launch" ]]; then
                     {
                     "type": "image_url",
                     "image_url": {
-                        "url": "dog.png"
+                        "url": "https://sf-maas-uat-prod.oss-cn-shanghai.aliyuncs.com/dog.png"
                     }
                     },
                     {
