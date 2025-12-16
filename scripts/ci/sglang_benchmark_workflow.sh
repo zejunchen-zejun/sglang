@@ -36,7 +36,7 @@ if [[ "${TYPE}" == "launch" ]]; then
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 128 \
             --page-size 16 \
-            --attention-backend aiter_attn \
+            --mm-attention-backend aiter_attn \
             --mm-enable-dp-encoder \
             --enable-aiter-allreduce-fusion \
             --mm-processor-kwargs '{"max_pixels": 1638400, "min_pixels": 740}' \
