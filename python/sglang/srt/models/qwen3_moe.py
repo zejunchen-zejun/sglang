@@ -420,8 +420,8 @@ class Qwen3MoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         if (
             _use_aiter
-            or (self.rope_scaling is not None and "aiter_rope_fused_qknorm" in self.rope_scaling)
-            or _use_aiter_rope_fused_qknorm
+            and ((self.rope_scaling is not None and "aiter_rope_fused_qknorm" in self.rope_scaling)
+            or _use_aiter_rope_fused_qknorm)
         ):
             assert self.k_norm.variance_epsilon == self.q_norm.variance_epsilon
             layer_id = self.attn.layer_id
