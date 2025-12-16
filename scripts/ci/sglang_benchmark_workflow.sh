@@ -18,7 +18,6 @@ echo "Detect model_name: ${model_name}"
 echo "Detect model_path ${model_path}"
 echo "Detect TP ${TP}"
 echo "Detect EP ${EP}"
-echo "Detect DP ${DP}"
 
 
 if [[ "${TYPE}" == "launch" ]]; then
@@ -53,7 +52,6 @@ if [[ "${TYPE}" == "launch" ]]; then
             --port 9000 \
             --tp-size ${TP} \
             --ep-size ${EP} \
-            --dp-size ${DP} \
             --trust-remote-code \
             --chunked-prefill-size 32768 \
             --mem-fraction-static 0.85 \
@@ -163,15 +161,15 @@ elif [[ "${TYPE}" == "performance" ]]; then
             --port 9000 \
             --model "${model_path}" \
             --dataset-name image \
-            --image-count 20 \
+            --image-count 10 \
             --image-resolution 960x1280 \
             --random-input-len 8000 \
             --random-output-len 500 \
-            --max-concurrency 2 \
+            --max-concurrency 1 \
             --num-prompts 128 \
             --flush-cache \
             --skip-special-tokens \
-            2>&1 | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}_DP${DP}.log
+            2>&1 | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
     else
         echo "Unknown model_name: ${model_name}"
         exit 1
@@ -179,7 +177,7 @@ elif [[ "${TYPE}" == "performance" ]]; then
 
 else
     echo "Unknown TYPE: ${TYPE}"
-    echo "Usage: $0 {launch|evaluation|performance} [model_name] [model_path] [TP] [EP] [DP]"
+    echo "Usage: $0 {launch|evaluation|performance} [model_name] [model_path] [TP] [EP]"
     exit 1
 fi
 
