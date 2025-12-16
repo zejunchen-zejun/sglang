@@ -7,7 +7,6 @@ model_name=${2:-Qwen3-VL-235B}
 model_path=${3:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
 TP=${4:-8}
 EP=${5:-8}
-DP=${6:-8}
 
 export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
@@ -149,7 +148,7 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
     python3 benchmark/mmmu/bench_sglang.py \
         --port 9000 \
         --concurrency 16 \
-        | tee vision_model_evaluation_${model_name}_TP${TP}_EP${EP}_DP${DP}.log
+        | tee vision_model_evaluation_${model_name}_TP${TP}_EP${EP}.log
 
 elif [[ "${TYPE}" == "performance" ]]; then
     echo
