@@ -112,7 +112,7 @@ class Qwen3_VisionMLP(nn.Module):
         x_fc1, _ = self.linear_fc1(x)
         if _use_aiter:
             gelu_output= torch.empty_like(x_fc1)
-            gelu_fast_vec(x_fc1, gelu_output)
+            gelu_fast_vec(gelu_output, x_fc1)
             mlp_output, _ = self.linear_fc2(gelu_output)
         else:
             mlp_output, _ = self.linear_fc2(self.act(x_fc1))
