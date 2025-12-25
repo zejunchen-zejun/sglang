@@ -53,7 +53,8 @@ jobs:
           ENV GPU_ARCHS="gfx942"
           ENV PYTORCH_ROCM_ARCH="gfx942"
           RUN echo "=== Aiter version BEFORE uninstall ===" && pip show aiter || true
-          RUN pip uninstall -y aiter
+          RUN echo "=== Aiter version BEFORE uninstall ===" && pip show amd-aiter || true
+          RUN pip uninstall -y aiter amd-aiter
           RUN rm -rf /opt/aiter/aiter/jit/build
           RUN rm -rf /opt/aiter/aiter/jit/*.so
           RUN rm -rf ~/.aiter
@@ -66,7 +67,7 @@ jobs:
             git submodule sync && git submodule update --init --recursive && \
             python3 setup.py develop
 
-          RUN echo "=== Aiter version AFTER installation ===" && pip show aiter || true
+          RUN echo "=== Aiter version AFTER installation ===" && pip show amd-aiter || true
 
           RUN echo "=== sgl-kernel version before installation ===" && pip show sgl-kernel || true
           RUN echo "=== sglang version before installation ===" && pip show sglang || true
@@ -121,7 +122,7 @@ jobs:
 
       - name: Show Aiter version
         run: |
-          docker exec sglang_test bash -c "pip show aiter"
+          docker exec sglang_test bash -c "pip show amd-aiter"
 
       - name: Show /dev/shm size
         run: |
