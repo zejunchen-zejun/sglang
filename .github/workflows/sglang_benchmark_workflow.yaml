@@ -128,7 +128,7 @@ jobs:
           docker exec sglang_test bash -c "df -h /dev/shm"
 
       - name: Launch the server
-        timeout-minutes: 60
+        timeout-minutes: 90
         run: |
           set -ex
           model_name=${{ matrix.model }}
