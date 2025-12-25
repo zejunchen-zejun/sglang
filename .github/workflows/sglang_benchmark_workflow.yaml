@@ -60,9 +60,9 @@ jobs:
           RUN pip install --upgrade "pybind11>=3.0.1"
           RUN pip show pybind11
 
-          RUN git clone https://github.com/ZLkanyo009/aiter.git /aiter && \
+          RUN git clone https://github.com/ROCm/aiter /aiter && \
             cd /aiter && \
-            git checkout qwen3vl-project && \
+            git checkout dev/perf && \
             git submodule sync && git submodule update --init --recursive && \
             python3 setup.py develop
 
