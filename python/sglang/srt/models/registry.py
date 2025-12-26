@@ -26,14 +26,14 @@ class _ModelRegistry:
         if overwrite:
             self.models.update(new_models)
         else:
-            ccnt = 0
-            for arch, cls in new_models.items():
-                if arch in self.models:
-                    raise ValueError(
-                        f"Model architecture {arch} already registered. Set overwrite=True to replace."
-                    )
-                print('[zejun] sglang ModelRegistry.register, [', ccnt, '] arch = ', arch, '. cls = ', cls, flush=True)
-                ccnt += 1
+            # ccnt = 0
+            # for arch, cls in new_models.items():
+            #     if arch in self.models:
+            #         raise ValueError(
+            #             f"Model architecture {arch} already registered. Set overwrite=True to replace."
+            #         )
+            #     print('[zejun] sglang ModelRegistry.register, [', ccnt, '] arch = ', arch, '. cls = ', cls, flush=True)
+            #     ccnt += 1
                 self.models[arch] = cls
 
     def get_supported_archs(self) -> AbstractSet[str]:
