@@ -27,7 +27,7 @@ def run_server(server_args):
 
 if __name__ == "__main__":
     server_args = prepare_server_args(sys.argv[1:])
-
+    print('[zejun] sgl sglang/python/sglang/launch_server.py launch_server', flush=True)
     try:
         run_server(server_args)
     finally:

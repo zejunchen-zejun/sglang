@@ -26,11 +26,16 @@ class _ModelRegistry:
         if overwrite:
             self.models.update(new_models)
         else:
+            # ccnt = 0
             for arch, cls in new_models.items():
                 if arch in self.models:
                     raise ValueError(
                         f"Model architecture {arch} already registered. Set overwrite=True to replace."
                     )
+                # print('[zejun] sglang ModelRegistry.register, [', ccnt, '] arch = ', arch, '. cls = ', cls, flush=True)
+                # ccnt += 1
+                if 'atom' in arch.lower():
+                    print('[zejun] sglang ModelRegistry.register, arch = ', arch, '. cls = ', cls, flush=True)
                 self.models[arch] = cls
 
     def get_supported_archs(self) -> AbstractSet[str]:
@@ -69,6 +74,7 @@ class _ModelRegistry:
         normalized_arch = list(
             filter(lambda model: model in self.models, architectures)
         )
+        print('[zejun] sglang ModelRegistry._normalize_archs, architectures = ', architectures, '. normalized_arch = ', normalized_arch, flush=True)
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
@@ -84,6 +90,7 @@ class _ModelRegistry:
         for arch in architectures:
             model_cls = self._try_load_model_cls(arch)
             if model_cls is not None:
+                print('[zejun] sglang ModelRegistry.resolve_model_cls, model_cls = ', model_cls, '. arch = ', arch, flush=True)
                 return (model_cls, arch)
 
         return self._raise_for_unsupported(architectures)

@@ -1672,6 +1672,7 @@ def launch_server(
     execute_warmup_func: Callable = _execute_server_warmup,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
+    print('[zejun] sgl sglang/python/sglang/srt/entrypoints/http_server.py launch_server', flush=True)
     """
     Launch SRT (SGLang Runtime) Server.
 

@@ -230,6 +230,7 @@ def _initialize_model(
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_class, _ = get_model_architecture(model_config)
+    print('[zejun] sglang _initialize_model, after get_model_architecture, model_class = ', model_class, flush=True)
     packed_modules_mapping = getattr(model_class, "packed_modules_mapping", {})
     remap_prefix = getattr(model_class, "remap_prefix", None)
     if _is_npu:
@@ -273,6 +274,9 @@ def _initialize_model(
         kwargs["sparse_head"] = envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.get()
         kwargs["model_path"] = model_config.model_path
 
+    print('[zejun] sglang _initialize_model, create model_class, model_class(**kwargs)', flush=True)
+    for arg in kwargs:
+        print('[zejun] sglang _initialize_model, arg type = ', type(kwargs[arg]), flush=True)
     return model_class(**kwargs)
 
 

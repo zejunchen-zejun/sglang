@@ -236,6 +236,7 @@ class Scheduler(
         pp_rank: int,
         dp_rank: Optional[int],
     ):
+        print('[zejun] sgl Scheduler init', flush=True)
         # Parse args
         self.server_args = server_args
         self.tp_rank = tp_rank
@@ -347,7 +348,9 @@ class Scheduler(
         self.init_request_dispatcher()
 
     def init_model_config(self):
+        print('[zejun] sgl Scheduler init_model_config', flush=True)
         self.model_config = ModelConfig.from_server_args(self.server_args)
+        print('[zejun] sgl Scheduler init_model_config, model_config = ', self.model_config, flush=True)
         self.dllm_config = (  # For diffusion LLM
             DllmConfig.from_server_args(self.server_args)
             if self.server_args.dllm_algorithm is not None
@@ -447,6 +450,7 @@ class Scheduler(
         self.require_mlp_sync = require_mlp_sync(self.server_args)
 
     def init_model_worker(self):
+        print('[zejun] sgl Scheduler init_model_worker', flush=True)
         from sglang.srt.managers.tp_worker import TpModelWorker
 
         self.tp_worker = TpModelWorker(

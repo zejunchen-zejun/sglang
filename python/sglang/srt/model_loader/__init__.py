@@ -25,6 +25,7 @@ def get_model(
     device_config: DeviceConfig,
 ) -> nn.Module:
     loader = get_model_loader(load_config, model_config)
+    print('[zejun] sglang get_model, loader = ', loader, flush=True)
     return loader.load_model(
         model_config=model_config,
         device_config=device_config,

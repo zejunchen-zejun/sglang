@@ -219,6 +219,7 @@ class TpModelWorker(BaseTpWorker):
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
         is_multi_layer_eagle: bool = False,
     ):
+        print('[zejun] sgl TpModelWorker init', flush=True)
         # Parse args
         self.tp_size = server_args.tp_size
         self.tp_rank = tp_rank
