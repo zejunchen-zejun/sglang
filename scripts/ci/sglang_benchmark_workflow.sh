@@ -95,7 +95,7 @@ if [[ "${TYPE}" == "launch" ]]; then
 
     echo
     echo "========== WAITING FOR SERVER TO BE READY ========"
-    max_retries=$"{TIMEOUT}"
+    max_retries=${TIMEOUT}
     retry_interval=60
     for ((i=1; i<=max_retries; i++)); do
         if curl -s http://localhost:9000/v1/completions -o /dev/null; then
