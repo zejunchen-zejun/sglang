@@ -30,10 +30,10 @@ if [[ "${TYPE}" == "launch" ]]; then
         export SGLANG_USE_AITER=1
         echo "********** AOT Prebuild aiter kernel start ... **********"
         cd /aiter
-        python3 test_rope.py
-        python3 test_rmsnorm2d.py
-        python3 test_rmsnorm2dFusedAddQuant.py
-        python3 test_trtllm_all_reduce_fusion.py
+        python3 op_tests/test_rope.py
+        python3 op_tests/test_rmsnorm2d.py
+        python3 op_tests/test_rmsnorm2dFusedAddQuant.py
+        python3 op_tests/test_trtllm_all_reduce_fusion.py
         echo "********** AOT Prebuild aiter kernel finished ... **********"
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
