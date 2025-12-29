@@ -7,6 +7,7 @@ model_name=${2:-Qwen3-VL-235B}
 model_path=${3:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
 TP=${4:-8}
 EP=${5:-8}
+TIMEOUT=${6:-60}
 
 export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
@@ -17,6 +18,7 @@ echo "Detect model_name: ${model_name}"
 echo "Detect model_path ${model_path}"
 echo "Detect TP ${TP}"
 echo "Detect EP ${EP}"
+echo "Detect TIMEOUT ${TIMEOUT}"
 
 
 if [[ "${TYPE}" == "launch" ]]; then
@@ -93,7 +95,7 @@ if [[ "${TYPE}" == "launch" ]]; then
 
     echo
     echo "========== WAITING FOR SERVER TO BE READY ========"
-    max_retries=60
+    max_retries=$"{TIMEOUT}"
     retry_interval=60
     for ((i=1; i<=max_retries; i++)); do
         if curl -s http://localhost:9000/v1/completions -o /dev/null; then
