@@ -8,7 +8,7 @@
 2. Install aiter:
    ```
    pip uninstall aiter
-   git clone -b qwen3vl-project https://github.com/ZLkanyo009/aiter.git
+   git clone -b dev/perf https://github.com/ROCm/aiter/
    cd aiter
    git checkout <target_commit>
    git submodule sync && git submodule update --init --recursive
