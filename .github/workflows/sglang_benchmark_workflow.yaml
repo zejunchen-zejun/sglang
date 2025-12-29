@@ -138,6 +138,8 @@ jobs:
             docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/Qwen/Qwen3-Next-80B-A3B-Instruct/ 4 1"
           elif [ "$model_name" == "Qwen3-Omni" ]; then
             docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 1"
+          elif [ "$model_name" == "Qwen3-235B-A22B-Instruct-2507-FP8-Dynamic" ]; then
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh launch $model_name /models/RedHatAI/Qwen3-235B-A22B-Instruct-2507-FP8-Dynamic/ 8 8"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -154,6 +156,8 @@ jobs:
             docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/Qwen/Qwen3-Next-80B-A3B-Instruct/ 4 1"
           elif [ "$model_name" == "Qwen3-Omni" ]; then
             docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 1"
+          elif [ "$model_name" == "Qwen3-235B-A22B-Instruct-2507-FP8-Dynamic" ]; then
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh evaluation $model_name /models/RedHatAI/Qwen3-235B-A22B-Instruct-2507-FP8-Dynamic/ 8 8"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
