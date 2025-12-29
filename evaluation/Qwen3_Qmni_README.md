@@ -41,7 +41,11 @@
     ```bash
     huggingface-cli download Qwen/Qwen3-Omni-30B-A3B-Instruct --local-dir /models/Qwen3-Omni-30B-A3B-Instruct
     ```
-    - Generate a **fp8 ptpc** quantized version using the quantization script [Qwen3-Omni-30B-A3B-Instruct PTPC FP8 Quantization with llm-compressor](https://github.com/sammysun0711/llm-benchmark-tools/tree/main/quantization)
+    - Download our pre-quantized **fp8 ptpc** model directly from Hugging Face:(We have uploaded the fp8 version so you can skip the quantization step.)
+    ```bash
+    huggingface-cli download sammysun0711/Qwen3-Omni-30B-A3B-Instruct-FP8-Dynamic --local-dir /models/Qwen3-Omni-30B-A3B-Instruct-FP8-Dynamic
+    ```
+    - Or generate a **fp8 ptpc** quantized version using the quantization script [Qwen3-Omni-30B-A3B-Instruct PTPC FP8 Quantization with llm-compressor](https://github.com/sammysun0711/llm-benchmark-tools/tree/main/quantization)
 
 - launch server:
 
