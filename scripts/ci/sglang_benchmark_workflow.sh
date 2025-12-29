@@ -12,6 +12,8 @@ TIMEOUT=${6:-60}
 export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
 export SGLANG_PROFILE_RECORD_SHAPES=1
+echo "GPU_ARCHS: ${GPU_ARCHS}"
+echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}"
 
 echo "Dectect TYPE ${TYPE}"
 echo "Detect model_name: ${model_name}"
@@ -26,6 +28,13 @@ if [[ "${TYPE}" == "launch" ]]; then
     echo "========== LAUNCHING SERVER ========"
     if [[ "${model_name}" == "Qwen3-VL-235B" ]]; then
         export SGLANG_USE_AITER=1
+        echo "********** AOT Prebuild aiter kernel start ... **********"
+        cd /aiter
+        python3 test_rope.py
+        python3 test_rmsnorm2d.py
+        python3 test_rmsnorm2dFusedAddQuant.py
+        python3 test_trtllm_all_reduce_fusion.py
+        echo "********** AOT Prebuild aiter kernel finished ... **********"
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
