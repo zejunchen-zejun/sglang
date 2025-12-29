@@ -31,6 +31,7 @@ if [[ "${TYPE}" == "launch" ]]; then
         echo "********** AOT Prebuild aiter kernel start ... **********"
         cd /aiter
         python3 op_tests/test_rope.py
+        python3 op_tests/test_layernorm2d.py
         python3 op_tests/test_rmsnorm2d.py
         python3 op_tests/test_rmsnorm2dFusedAddQuant.py
         python3 op_tests/test_trtllm_all_reduce_fusion.py
