@@ -8,7 +8,7 @@
 2. Install aiter:
    ```
    pip uninstall aiter
-   git clone -b dev/perf https://github.com/ROCm/aiter/
+   git clone -b dev/perf https://github.com/ROCm/aiter.git
    cd aiter
    git checkout <target_commit>
    git submodule sync && git submodule update --init --recursive
