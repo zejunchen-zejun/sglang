@@ -77,11 +77,20 @@ if [[ "${TYPE}" == "launch" ]]; then
     elif [[ "${model_name}" == "Qwen3-Omni" ]]; then
         echo "Qwen3-Omni-Server Launch"
         export SGLANG_USE_CUDA_IPC_TRANSPORT=1
-        export SGLANG_VLM_CACHE_SIZE_MB=0
+        export SGLANG_VLM_CACHE_SIZE_MB=8192
         export SGLANG_USE_AITER=1
         export USE_PA=1
         export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
         export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
+        export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=0
+        export ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+        echo "********** AOT Prebuild aiter kernel start ... **********"
+        python3 op_tests/test_rope.py
+        python3 op_tests/test_layernorm2d.py
+        python3 op_tests/test_rmsnorm2d.py
+        python3 op_tests/test_rmsnorm2dFusedAddQuant.py
+        python3 op_tests/test_trtllm_all_reduce_fusion.py
+        echo "********** AOT Prebuild aiter kernel finished ... **********"
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
@@ -94,8 +103,10 @@ if [[ "${TYPE}" == "launch" ]]; then
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 8 \
-            --page-size 64  \
+            --page-size 32  \
             --mm-enable-dp-encoder \
+            --enable-aiter-allreduce-fusion \
+            --max-running-requests 128 \
             --watchdog-timeout 1200 &
         sglang_pid=$!
     else
