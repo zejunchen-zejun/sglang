@@ -114,6 +114,8 @@ if [[ "${TYPE}" == "launch" ]]; then
         export SGLANG_USE_AITER=1
         export AITER_ROPE_FUSED_QKNORM=1
         export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
+        export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
+        export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=1
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
