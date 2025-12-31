@@ -199,7 +199,6 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
     if [[ "${model_name}" == "Qwen3-235B-A22B-Instruct-2507-FP8-Dynamic" ]]; then
         python3 benchmark/gsm8k/bench_sglang.py \
             --port 9000 \
-            --concurrency 16 \
             --num-questions 2000 \
             | tee text_model_evaluation_${model_name}_TP${TP}_EP${EP}.log
     else
