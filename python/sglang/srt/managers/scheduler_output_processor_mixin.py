@@ -41,9 +41,15 @@ class SchedulerOutputProcessorMixin:
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        import time
+
+        overall_start = time.time()
+
         skip_stream_req = None
 
         if self.is_generation:
+            # Step 1: GPU synchronization and data extraction
+            step1_start = time.time()
             if result.copy_done is not None:
                 result.copy_done.synchronize()
 
@@ -58,8 +64,11 @@ class SchedulerOutputProcessorMixin:
                 result.extend_input_len_per_req,
                 result.extend_logprob_start_len_per_req,
             )
+            step1_duration = (time.time() - step1_start) * 1000
+            # logger.info(f"[OUTPUT_PROC_DETAIL] Step 1 - GPU sync & data extract: {step1_duration:.2f} ms")
 
-            # Move next_token_ids and logprobs to cpu
+            # Step 2: GPU to CPU transfer
+            step2_start = time.time()
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:
                 if logits_output.next_token_logprobs is not None:
@@ -70,10 +79,12 @@ class SchedulerOutputProcessorMixin:
                     logits_output.input_token_logprobs = tuple(
                         logits_output.input_token_logprobs.tolist()
                     )
+            step2_duration = (time.time() - step2_start) * 1000
+            # logger.info(f"[OUTPUT_PROC_DETAIL] Step 2 - GPU->CPU transfer: {step2_duration:.2f} ms")
 
+            # Step 3: Process each request
+            step3_start = time.time()
             hidden_state_offset = 0
-
-            # Check finish conditions
             logprob_pt = 0
 
             for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
@@ -188,6 +199,9 @@ class SchedulerOutputProcessorMixin:
                                 )
                             logprob_pt += num_input_logprobs
 
+            step3_duration = (time.time() - step3_start) * 1000
+            # logger.info(f"[OUTPUT_PROC_DETAIL] Step 3 - Process requests: {step3_duration:.2f} ms")
+
         else:  # embedding or reward model
             is_sparse = envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.is_set()
 
@@ -224,7 +238,20 @@ class SchedulerOutputProcessorMixin:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1
 
+        overall_duration = (time.time() - overall_start) * 1000
+        # Calculate sum of all steps
+        if self.is_generation:
+            total_steps = step1_duration + step2_duration + step3_duration
+            # logger.info(f"[OUTPUT_PROC_DETAIL] === process_batch_result_prefill TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ===")
+        # else:
+        # logger.info(f"[OUTPUT_PROC_DETAIL] === process_batch_result_prefill TOTAL: {overall_duration:.2f} ms ===")
+
+        stream_output_call_start = time.time()
         self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
+        stream_output_call_duration = (time.time() - stream_output_call_start) * 1000
+        logger.info(
+            f"[OUTPUT_PROC_GAP] stream_output() call took: {stream_output_call_duration:.2f} ms"
+        )
 
     def _resolve_spec_overlap_token_ids(
         self: Scheduler, result: GenerationBatchResult, batch: ScheduleBatch
@@ -710,6 +737,12 @@ class SchedulerOutputProcessorMixin:
         return_logprob: bool,
         skip_req: Optional[Req] = None,
     ):
+        import time
+
+        overall_start = time.time()
+
+        # Step 1: Collect request data
+        step1_start = time.time()
         rids = []
         http_worker_ipcs = []
         finished_reasons: List[BaseFinishReason] = []
@@ -912,9 +945,38 @@ class SchedulerOutputProcessorMixin:
             ):
                 req.log_time_stats()
 
+        step1_duration = (time.time() - step1_start) * 1000
+        # logger.info(f"[OUTPUT_PROC_DETAIL] Step 4 - Collect request data: {step1_duration:.2f} ms")
+
+        # Step 2: Prepare output structure
+        step2_start = time.time()
+        output_send_time = time.time()
+
+        prefill_preparation_times = []
+        vit_encoding_times = []
+        llm_prefill_times = []
+        total_prefill_times = []
+        scheduler_receive_times = []
+        model_call_times = []
+        first_token_generated_times = []
+        output_send_times = []
+        for req in reqs:
+            if req.stream:
+                prefill_preparation_times.append(req.prefill_preparation_time)
+                vit_encoding_times.append(req.vit_encoding_time)
+                llm_prefill_times.append(req.llm_prefill_time)
+                total_prefill_times.append(req.total_prefill_time)
+                scheduler_receive_times.append(req.scheduler_receive_time)
+                model_call_times.append(req.model_call_time)
+                first_token_generated_times.append(req.first_token_generated_time)
+                output_send_times.append(output_send_time)
+
         # Send to detokenizer
         if rids:
             if self.model_config.is_multimodal_gen:
+                overall_duration = (time.time() - overall_start) * 1000
+                total_steps = step1_duration
+                # logger.info(f"[OUTPUT_PROC_DETAIL] === stream_output_generation TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ===")
                 return
 
             self.send_to_detokenizer.send_output(
@@ -950,8 +1012,36 @@ class SchedulerOutputProcessorMixin:
                     http_worker_ipcs=http_worker_ipcs,
                     placeholder_tokens_idx=None,
                     placeholder_tokens_val=None,
+                    prefill_preparation_time=(
+                        prefill_preparation_times if prefill_preparation_times else None
+                    ),
+                    vit_encoding_time=(
+                        vit_encoding_times if vit_encoding_times else None
+                    ),
+                    llm_prefill_time=llm_prefill_times if llm_prefill_times else None,
+                    total_prefill_time=(
+                        total_prefill_times if total_prefill_times else None
+                    ),
+                    scheduler_receive_time=(
+                        scheduler_receive_times if scheduler_receive_times else None
+                    ),
+                    model_call_time=model_call_times if model_call_times else None,
+                    first_token_generated_time=(
+                        first_token_generated_times
+                        if first_token_generated_times
+                        else None
+                    ),
+                    output_send_time=output_send_times if output_send_times else None,
                 )
             )
+            step2_duration = (time.time() - step2_start) * 1000
+            # logger.info(f"[OUTPUT_PROC_DETAIL] Step 5 - Send to detokenizer: {step2_duration:.2f} ms")
+            total_steps = step1_duration + step2_duration
+        else:
+            total_steps = step1_duration
+
+        overall_duration = (time.time() - overall_start) * 1000
+        # logger.info(f"[OUTPUT_PROC_DETAIL] === stream_output_generation TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ===")
 
     def stream_output_embedding(self: Scheduler, reqs: List[Req]):
         rids = []

@@ -857,6 +857,18 @@ class BatchTokenIDOutput(BaseBatchReq):
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
 
+    # TTFT breakdown timing (in seconds)
+    prefill_preparation_time: List[float] = None
+    vit_encoding_time: List[float] = None
+    llm_prefill_time: List[float] = None
+    total_prefill_time: List[float] = None
+
+    # Scheduler overhead timing (in seconds)
+    scheduler_receive_time: List[float] = None
+    model_call_time: List[float] = None
+    first_token_generated_time: List[float] = None
+    output_send_time: List[float] = None
+
 
 @dataclass
 class BatchMultimodalDecodeReq(BaseBatchReq):
@@ -932,6 +944,20 @@ class BatchStrOutput(BaseBatchReq):
 
     # The trainer step id. Used to know which step's weights are used for sampling.
     token_steps: List[List[int]] = None
+
+    # TTFT breakdown timing (in seconds)
+    prefill_preparation_time: List[float] = None
+    vit_encoding_time: List[float] = None
+    llm_prefill_time: List[float] = None
+    total_prefill_time: List[float] = None
+
+    # Scheduler overhead timing (in seconds)
+    scheduler_receive_time: List[float] = None
+    model_call_time: List[float] = None
+    first_token_generated_time: List[float] = None
+    output_send_time: List[float] = None
+    detokenizer_receive_time: List[float] = None
+    detokenizer_send_time: List[float] = None
 
 
 @dataclass

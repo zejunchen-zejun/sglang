@@ -667,6 +667,22 @@ class Req:
         # For metrics
         self.metrics_collector = metrics_collector
         self.time_stats: TimeStats = TimeStats(disagg_mode=disagg_mode)
+
+        # TTFT breakdown timing (in seconds)
+        self.prefill_preparation_time: float = 0.0
+        self.vit_encoding_time: float = 0.0
+        self.llm_prefill_time: float = 0.0
+        self.total_prefill_time: float = 0.0
+
+        # Additional timing for scheduler overhead
+        self.scheduler_receive_time: float = 0.0  # When scheduler receives this request
+        self.batch_prepare_time: float = 0.0  # When batch preparation is complete
+        self.model_call_time: float = 0.0  # When model_worker.forward is called
+        self.first_token_generated_time: float = (
+            0.0  # When first token is generated in scheduler
+        )
+        self.output_send_time: float = 0.0  # When scheduler sends output to detokenizer
+
         self.has_log_time_stats: bool = False
         self.last_tic = time.monotonic()
 
@@ -1127,6 +1143,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return len(self.reqs) == 0
 
     def prepare_encoder_info_extend(self, input_ids: List[int], seq_lens: List[int]):
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         self.encoder_lens_cpu = []
         self.encoder_cached = []
 
@@ -1138,10 +1158,21 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 self.encoder_cached.append(True)
             else:
                 self.encoder_lens_cpu.append(im.num_image_tokens)
-                self.encoder_cached.append(
+                is_cached = (
                     self.forward_mode.is_decode()
                     or len(req.prefix_indices) >= im.num_image_tokens
                 )
+                self.encoder_cached.append(is_cached)
+
+                # Log cache hit/miss for TTFT analysis
+                if is_cached:
+                    msg = f"[ENCODER_CACHE] Req {req.rid}: ✓ Cache HIT - Skipping ViT encoding ({im.num_image_tokens} tokens cached, prefix_len={len(req.prefix_indices)})"
+                    logger.info(msg)
+                    print(msg, flush=True)
+                else:
+                    msg = f"[ENCODER_CACHE] Req {req.rid}: ✗ Cache MISS - Will run ViT encoding ({im.num_image_tokens} tokens needed, prefix_len={len(req.prefix_indices)})"
+                    logger.info(msg)
+                    print(msg, flush=True)
 
         self.encoder_lens = torch.tensor(self.encoder_lens_cpu, dtype=torch.int64).to(
             self.device, non_blocking=True
@@ -1364,7 +1395,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                     mm_item.feature = pixel_values.reconstruct_on_target_device(
                         torch.cuda.current_device()
                     )
-    
+
         self.multimodal_inputs = multimodal_inputs
         self.token_type_ids = token_type_ids_tensor
         self.seq_lens_sum = sum(seq_lens)

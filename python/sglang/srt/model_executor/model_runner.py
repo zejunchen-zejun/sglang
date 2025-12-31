@@ -1988,6 +1988,13 @@ class ModelRunner:
         skip_attn_backend_init: bool = False,
         pp_proxy_tensors=None,
     ) -> LogitsProcessorOutput:
+        import logging
+        import time
+
+        logger = logging.getLogger(__name__)
+
+        prefill_start_time = time.time()
+
         if not skip_attn_backend_init:
             self.attn_backend.init_forward_metadata(forward_batch)
 
@@ -2003,12 +2010,39 @@ class ModelRunner:
             if self.piecewise_cuda_graph_runner.can_run(forward_batch):
                 return self.piecewise_cuda_graph_runner.replay(forward_batch, **kwargs)
 
-        return self.model.forward(
+        # Synchronize before model forward timing
+        torch.cuda.synchronize()
+        model_forward_start = time.time()
+        prefill_prep_time = model_forward_start - prefill_start_time
+        logger.info(
+            f"[TTFT_BREAKDOWN] Prefill preparation time: {prefill_prep_time * 1000:.2f} ms"
+        )
+
+        result = self.model.forward(
             forward_batch.input_ids,
             forward_batch.positions,
             forward_batch,
             **kwargs,
         )
+
+        # Synchronize after model forward to ensure completion
+        torch.cuda.synchronize()
+        model_forward_end = time.time()
+        model_forward_time = model_forward_end - model_forward_start
+        total_forward_time = model_forward_end - prefill_start_time
+
+        logger.info(
+            f"[TTFT_BREAKDOWN] Model forward (ViT + LLM Prefill) time: {model_forward_time * 1000:.2f} ms"
+        )
+        logger.info(
+            f"[TTFT_BREAKDOWN] Total prefill time: {total_forward_time * 1000:.2f} ms"
+        )
+
+        # Store timing in forward_batch for later retrieval
+        forward_batch.prefill_preparation_time = prefill_prep_time
+        forward_batch.total_model_forward_time = total_forward_time
+
+        return result
 
     def forward_idle(
         self, forward_batch: ForwardBatch, pp_proxy_tensors=None

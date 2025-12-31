@@ -273,41 +273,75 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
-        base_output = self.load_mm_data(
-            prompt=input_text,
-            image_data=image_data,
-            video_data=request_obj.video_data,
-            audio_data=request_obj.audio_data,
-            multimodal_tokens=self.mm_tokens,
+        logger.info(
+            f"[DEBUG_TRACE] 🚀 QwenVL.process_mm_data_async 开始: images={len(image_data) if image_data else 0}, videos={len(request_obj.video_data) if request_obj.video_data else 0}, audios={len(request_obj.audio_data) if request_obj.audio_data else 0}"
         )
+        logger.info(f"[DEBUG_TRACE] → 调用 load_mm_data")
+        try:
+            base_output = self.load_mm_data(
+                prompt=input_text,
+                image_data=image_data,
+                video_data=request_obj.video_data,
+                audio_data=request_obj.audio_data,
+                multimodal_tokens=self.mm_tokens,
+            )
+            logger.info(
+                f"[DEBUG_TRACE] ✓ load_mm_data 完成: images={len(base_output.images)}, videos={len(base_output.videos)}, audios={len(base_output.audios)}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] ✗ load_mm_data 异常: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            raise
 
         # Qwen-specific: resize images if they are raw Image objects
         # Only apply default resize logic if mm_processor_kwargs was not set by user
+        logger.info(f"[DEBUG_TRACE] → 检查是否需要 resize images")
         if not self.server_args.mm_processor_kwargs:
             if base_output.images and isinstance(base_output.images[0], Image.Image):
+                logger.info(
+                    f"[DEBUG_TRACE] → 执行异步 resize {len(base_output.images)} 张图像"
+                )
                 resize_tasks = [
                     resize_image_async(image) for image in base_output.images
                 ]
                 base_output.images = await asyncio.gather(*resize_tasks)
+                logger.info(f"[DEBUG_TRACE] ✓ 图像 resize 完成")
         video_metadata = None
         if base_output.videos:
+            logger.info(f"[DEBUG_TRACE] → 预处理 {len(base_output.videos)} 个视频")
             video_results = await asyncio.gather(
                 *[preprocess_video(video) for video in base_output.videos]
             )
             base_output.videos, video_metadata = map(list, zip(*video_results))
+            logger.info(f"[DEBUG_TRACE] ✓ 视频预处理完成")
 
         # NOTE: for qwen3-vl, video_meta need to be passed in, since do_sample_frames is already done in preprocess_video
-        if self.hf_config.model_type in ("qwen3_vl", "qwen3_vl_moe"):
-            mm_items, input_ids, ret = self.process_and_combine_mm_data(
-                base_output,
-                self.mm_tokens,
-                video_metadata=video_metadata,
-                do_sample_frames=False,
+        logger.info(
+            f"[DEBUG_TRACE] → 调用 process_and_combine_mm_data, model_type={self.hf_config.model_type}"
+        )
+        try:
+            if self.hf_config.model_type in ("qwen3_vl", "qwen3_vl_moe"):
+                mm_items, input_ids, ret = self.process_and_combine_mm_data(
+                    base_output,
+                    self.mm_tokens,
+                    video_metadata=video_metadata,
+                    do_sample_frames=False,
+                )
+            else:
+                mm_items, input_ids, ret = self.process_and_combine_mm_data(
+                    base_output, self.mm_tokens
+                )
+            logger.info(
+                f"[DEBUG_TRACE] ✓ process_and_combine_mm_data 完成: mm_items={len(mm_items)}, input_ids.shape={input_ids.shape}"
             )
-        else:
-            mm_items, input_ids, ret = self.process_and_combine_mm_data(
-                base_output, self.mm_tokens
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] ✗ process_and_combine_mm_data 异常: {type(e).__name__}: {e}",
+                exc_info=True,
             )
+            raise
 
         audio_feature_lengths = None
 
