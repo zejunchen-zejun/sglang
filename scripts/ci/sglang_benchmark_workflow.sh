@@ -128,7 +128,8 @@ if [[ "${TYPE}" == "launch" ]]; then
             --trust-remote-code \
             --max-prefill-tokens 65536 \
             --context-length 65536 \
-            --page-size 16 \
+            --kv-cache-dtype fp8_e4m3 \
+            --page-size 1024 \
             --max-running-requests 512 \
             --chunked-prefill-size 65536 \
             --mem-fraction-static 0.9 \
