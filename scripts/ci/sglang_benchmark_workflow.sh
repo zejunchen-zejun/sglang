@@ -203,6 +203,7 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
             --port 9000 \
             --concurrency 16 \
             | tee vision_model_evaluation_${model_name}_TP${TP}_EP${EP}.log
+    fi
 
 elif [[ "${TYPE}" == "performance" ]]; then
     echo
