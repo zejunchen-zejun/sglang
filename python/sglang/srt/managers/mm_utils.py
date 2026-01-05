@@ -2,17 +2,19 @@
 Multi-modality utils
 """
 
-import hashlib
+import os
 import pickle
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
+import blake3
 import numpy as np
 import torch
 from torch import nn
 
 from sglang.srt.layers.multimodal import gpu_tensor_hash
 from sglang.srt.managers.schedule_batch import (
+    CudaIpcTensorTransportProxy,
     Modality,
     MultimodalDataItem,
     MultimodalInputs,
@@ -20,7 +22,13 @@ from sglang.srt.managers.schedule_batch import (
 from sglang.srt.mem_cache.multimodal_cache import MultiModalCache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import get_global_server_args
-from sglang.srt.utils import flatten_nested_list, is_npu, print_warning_once
+from sglang.srt.utils import (
+    flatten_nested_list,
+    is_cuda_alike,
+    is_hip,
+    is_npu,
+    print_warning_once,
+)
 from sglang.utils import logger
 
 _is_npu = is_npu()
@@ -77,10 +85,9 @@ class TransportProxyTensor(torch.Tensor):
             "tensor_data": None,
             "ipc_extra": None,
         }
-
         transport_mode = self._metadata.get("transport_mode", "default")
 
-        if transport_mode == "cuda_ipc" and self.is_cuda:
+        if transport_mode == "cuda_ipc" and self.is_cuda_alike:
             try:
                 storage = self.untyped_storage()
                 handle = storage._share_cuda_()
@@ -91,8 +98,10 @@ class TransportProxyTensor(torch.Tensor):
                     "dtype": self.dtype,
                     "stride": self.stride(),
                     "device_index": self.device.index,
+                    "storage_offset": self.storage_offset(),
                 }
                 state["tensor_data"] = None
+
             except Exception as e:
                 # Failed to get CUDA IPC handle (possibly tp). Falling back to default transport.
                 state["metadata"]["transport_mode"] = "default"
@@ -113,24 +122,25 @@ class TransportProxyTensor(torch.Tensor):
 
         if transport_mode == "cuda_ipc" and state["ipc_extra"] is not None:
             ipc_extra = state["ipc_extra"]
-            handle, shape, dtype, stride, source_device_index = (
+            handle, shape, dtype, stride, source_device_index, s_offset = (
                 ipc_extra["handle"],
                 ipc_extra["shape"],
                 ipc_extra["dtype"],
                 ipc_extra["stride"],
                 ipc_extra["device_index"],
+                ipc_extra["storage_offset"],
             )
 
             try:
                 target_device = torch.device(f"cuda:{source_device_index}")
+                
                 with torch.cuda.device(target_device):
                     storage = torch.UntypedStorage._new_shared_cuda(*handle)
                     reconstructed_tensor = torch.empty(
                         0, dtype=dtype, device=target_device
-                    ).set_(storage, storage_offset=0, size=shape, stride=stride)
+                    ).set_(storage, storage_offset=s_offset, size=shape, stride=stride)
                     self.set_(reconstructed_tensor)
             except Exception as e:
-                print(f"Error: Failed to deserialize from CUDA IPC handle ({e}).")
                 raise e
 
         elif state["tensor_data"] is not None:
@@ -296,6 +306,11 @@ def get_embedding_hash(embedding_items: List[MultimodalDataItem]) -> int:
     return hash(tuple(hash_list))
 
 
+def get_embedding_hash_list(embedding_items: List[MultimodalDataItem]) -> int:
+    hash_list = [item.hash for item in embedding_items]
+    return hash_list
+
+
 def get_embedding_chunk(
     embedding: torch.Tensor,
     extend_prefix_len: int,
@@ -369,42 +384,110 @@ def _get_chunked_prefill_embedding(
     prefix_length: List[int],
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
-) -> Optional[torch.Tensor]:
+) -> Tuple[Optional[torch.Tensor], int]:
     # Calculate embedding for each request, try to get it from cache to avoid repeated calculation
     embedding_list = []
+    expected_token_count = 0
     # FIXME(Xinyuan): temporary workaround for eagle3, which may have len(items_size) > len(prefix_length)
-    max_iterations = min(len(items_size) - 1, len(prefix_length))
-    for i in range(max_iterations):
-        if items_size[i] == items_size[i + 1]:
-            continue
-        embedding_items_per_req = embedding_items[items_size[i] : items_size[i + 1]]
-        items_offset = items_offset_list[i]
-        assert items_offset is not None, items_offset
-        embedding_items_hash = get_embedding_hash(embedding_items_per_req)
-        # if all items has been prefixed, we do not need to calculate embedding
-        if all([offset_end < prefix_length[i] for _, offset_end in items_offset]):
-            continue
-        embedding_per_req = embedding_cache.get(embedding_items_hash)
-        if embedding_per_req is None:
-            embedding_per_req = data_embedding_func(embedding_items_per_req)
-            if not embedding_cache.put(embedding_items_hash, embedding_per_req):
-                print_warning_once(
-                    "Multimodal embedding cache is full. This typically occurs when a single "
-                    "embedding exceeds the cache size limit. Consider increasing the "
-                    "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
-                    "embedding size."
-                )
+    if not get_global_server_args().mm_enable_dp_encoder:
+        max_iterations = min(len(items_size) - 1, len(prefix_length))
+        for i in range(max_iterations):
+            if items_size[i] == items_size[i + 1]:
+                continue
+            embedding_items_per_req = embedding_items[items_size[i] : items_size[i + 1]]
+            items_offset = items_offset_list[i]
+            assert items_offset is not None, items_offset
+            embedding_items_hash = get_embedding_hash(embedding_items_per_req)
+            # if all items has been prefixed, we do not need to calculate embedding
+            if all([offset_end < prefix_length[i] for _, offset_end in items_offset]):
+                continue
+            embedding_per_req = embedding_cache.get(embedding_items_hash)
+            if embedding_per_req is None:
+                embedding_per_req = data_embedding_func(embedding_items_per_req)
+                if not embedding_cache.put(embedding_items_hash, embedding_per_req):
+                    print_warning_once(
+                        "Multimodal embedding cache is full. This typically occurs when a single "
+                        "embedding exceeds the cache size limit. Consider increasing the "
+                        "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
+                        "embedding size."
+                    )
 
-        embedding_per_req_chunk, _, _ = get_embedding_chunk(
-            embedding=embedding_per_req,
-            extend_prefix_len=prefix_length[i],
-            extend_seq_len=extend_length[i] if i < len(extend_length) else 0,
-            items_offset=items_offset,
-        )
-        embedding_list.append(embedding_per_req_chunk)
+            embedding_per_req_chunk, start_idx, end_idx = get_embedding_chunk(
+                embedding=embedding_per_req,
+                extend_prefix_len=prefix_length[i],
+                extend_seq_len=extend_length[i] if i < len(extend_length) else 0,
+                items_offset=items_offset,
+            )
+            embedding_list.append(embedding_per_req_chunk)
+            expected_token_count += end_idx - start_idx
+    else:
+        embedding_items_hash_list = get_embedding_hash_list(embedding_items)
+
+        embedding_items_uncached = []
+        embedding_items_hash_list_uncached = []
+        embedding_items_feature_num = []
+        for i in range(len(embedding_items)):
+            embedding_per_req = embedding_cache.get(embedding_items_hash_list[i])
+            embedding_list.append(embedding_per_req)
+            if embedding_per_req is None:
+                embedding_items_uncached.append(embedding_items[i])
+                if embedding_items[i].modality == Modality.AUDIO:
+                    embedding_items_feature_num.append(1) # audio always has 1 object
+                elif embedding_items[i].modality == Modality.IMAGE:
+                    embedding_items_feature_num.append(
+                        embedding_items[i].image_grid_thw.shape[0]
+                    )
+                else:
+                    # TODO: Handle the case where embedding_items[i].modality is VIDEO.
+                    print_warning_once(f"Cannot handel type { embedding_items[i].modality}")
+                embedding_items_hash_list_uncached.append(embedding_items_hash_list[i])
+
+        if None in embedding_list:
+            embeddings = data_embedding_func(embedding_items_uncached)
+            embeddings_merged = []
+            embeddings_idx = 0
+            for feature_num in embedding_items_feature_num:
+                if embedding_items[i].modality == Modality.AUDIO:
+                    embeddings_merged.append(embeddings)
+                elif embedding_items[i].modality == Modality.IMAGE:
+                    embeddings_merged.append(
+                        torch.cat(
+                            embeddings[embeddings_idx : embeddings_idx + feature_num], dim=0
+                        )
+                    )
+                else:
+                    # TODO: Handle the case where embedding_items[i].modality is VIDEO.
+                    print_warning_once(f"Cannot handel type { embedding_items[i].modality}")
+                embeddings_idx += feature_num
+
+            for embedding_items_hash, embedding_per_req in zip(
+                embedding_items_hash_list_uncached, embeddings_merged
+            ):
+                if not embedding_cache.put(embedding_items_hash, embedding_per_req):
+                    print_warning_once(
+                        "Multimodal embedding cache is full. This typically occurs when a single "
+                        "embedding exceeds the cache size limit. Consider increasing the "
+                        "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
+                        "embedding size."
+                    )
+        embeddings_merged_idx = 0
+        for i in range(len(embedding_list)):
+            if embedding_list[i] is None:
+                embedding_list[i] = embeddings_merged[embeddings_merged_idx]
+                embeddings_merged_idx += 1
+
+        for i in range(len(embedding_items)):
+            embedding_per_req_chunk, start_idx, end_idx = get_embedding_chunk(
+                embedding=embedding_list[i],
+                extend_prefix_len=prefix_length[i],
+                extend_seq_len=extend_length[i] if i < len(extend_length) else 0,
+                items_offset=items_offset_list[i],
+            )
+            embedding_list[i] = embedding_per_req_chunk
+            expected_token_count += end_idx - start_idx
     if len(embedding_list) == 0:
         return None
-    return torch.concat(embedding_list, dim=0)
+    return torch.concat(embedding_list, dim=0), expected_token_count
 
 
 def _get_multimodal_mask(
@@ -417,16 +500,17 @@ def _adjust_embedding_length(
     embedding: torch.Tensor,
     mask: torch.Tensor,
     logger,
+    expected_token_count: int,
 ) -> torch.Tensor:
     num_mm_tokens_in_embedding = embedding.shape[0]
     num_mm_tokens_in_input_ids = mask.sum().item()
-    if num_mm_tokens_in_input_ids != num_mm_tokens_in_embedding:
+    if expected_token_count != num_mm_tokens_in_embedding:
         logger.warning(
             f"Number of tokens in multimodal embedding does not match those in the input text. "
-            f"Got {num_mm_tokens_in_input_ids} tokens in the text but {num_mm_tokens_in_embedding} "
+            f"Got {expected_token_count} tokens in the text but {num_mm_tokens_in_embedding} "
             f"tokens from multimodal embeddings."
         )
-        if num_mm_tokens_in_input_ids < num_mm_tokens_in_embedding:
+        if expected_token_count < num_mm_tokens_in_embedding:
             chunked_prefill_size = get_global_server_args().chunked_prefill_size
             if chunked_prefill_size != -1:
                 logger.warning(
@@ -434,13 +518,13 @@ def _adjust_embedding_length(
                 )
             # extract from the end: this is a compromise
             if embedding.dim() == 2:
-                embedding = embedding[-num_mm_tokens_in_input_ids:, :]
+                embedding = embedding[-expected_token_count:, :]
             else:
-                num_multimodal = num_mm_tokens_in_input_ids // embedding.shape[0]
+                num_multimodal = expected_token_count // embedding.shape[0]
                 embedding = embedding[-num_multimodal:, :]
         else:
             raise RuntimeError(
-                f"Insufficient multimodal embedding length: {num_mm_tokens_in_input_ids=} vs {num_mm_tokens_in_embedding=}. This is an internal error"
+                f"Insufficient multimodal embedding length: {expected_token_count=} vs {num_mm_tokens_in_embedding=}. This is an internal error"
             )
     return embedding
 
@@ -476,7 +560,7 @@ def get_embedding_and_mask(
     # 1. Get embedding
     embedding = _get_precomputed_embedding(embedding_items)
     if embedding is None:
-        embedding = _get_chunked_prefill_embedding(
+        embedding, expected_token_count = _get_chunked_prefill_embedding(
             data_embedding_func,
             embedding_items,
             items_size,
@@ -491,7 +575,9 @@ def get_embedding_and_mask(
         torch.npu.current_stream().synchronize()
     special_multimodal_mask = _get_multimodal_mask(input_ids, placeholder_tensor)
     # 3. Adjust embedding length if needed
-    embedding = _adjust_embedding_length(embedding, special_multimodal_mask, logger)
+    embedding = _adjust_embedding_length(
+        embedding, special_multimodal_mask, logger, expected_token_count
+    )
     return embedding, special_multimodal_mask
 
 
@@ -617,18 +703,36 @@ def embed_mm_inputs(
         other_info["input_deepstack_embeds"] = input_deepstack_embeds
 
     # 4. scatter embeddings into input embedding
+    # Use masked_scatter_ to completely avoid D2D synchronization
     for i, modality, embedding, mask in zip(
         range(len(embeddings)), modalities, embeddings, masks
     ):
         if embedding is None or mask is None:
             continue
-        # in-place update
-        indices = torch.where(mask.squeeze(dim=-1))[0]
-        inputs_embeds[indices] = embedding.to(inputs_embeds.device, inputs_embeds.dtype)
+
+        mask_1d = mask.view(-1)
+
+        # Convert embedding to target device/dtype if needed
+        if (
+            embedding.device != inputs_embeds.device
+            or embedding.dtype != inputs_embeds.dtype
+        ):
+            embedding = embedding.to(inputs_embeds.device, inputs_embeds.dtype)
+
+        # masked_scatter_ is a pure GPU kernel operation - no D2D
+        # Need to expand mask to match embedding dimensions
+        inputs_embeds.masked_scatter_(mask_1d.unsqueeze(-1), embedding)
+
         if use_deepstack.get(modality, None):
-            input_deepstack_embeds[indices] = deepstack_embeddings[i].to(
-                inputs_embeds.device, inputs_embeds.dtype
-            )
+            deepstack_emb = deepstack_embeddings[i]
+            if (
+                deepstack_emb.device != inputs_embeds.device
+                or deepstack_emb.dtype != inputs_embeds.dtype
+            ):
+                deepstack_emb = deepstack_emb.to(
+                    inputs_embeds.device, inputs_embeds.dtype
+                )
+            input_deepstack_embeds.masked_scatter_(mask_1d.unsqueeze(-1), deepstack_emb)
 
     return inputs_embeds, other_info
 
@@ -770,7 +874,7 @@ def get_multimodal_data_bounds(
 
 
 def data_hash(data) -> int:
-    hash_bytes = hashlib.sha256(data).digest()[:8]
+    hash_bytes = blake3.blake3(data).digest()[:8]
     return int.from_bytes(hash_bytes, byteorder="big", signed=False)
 
 
@@ -781,11 +885,14 @@ def tensor_hash(tensor_list) -> int:
     tensor = tensor_list
     if isinstance(tensor_list, list):
         tensor_list = flatten_nested_list(tensor_list)
-        tensor_list = [
-            x.flatten() if isinstance(x, torch.Tensor) else x for x in tensor_list
-        ]
-        tensor = torch.concat(tensor_list)
-    if tensor.is_cuda:
+        if len(tensor_list) == 1:
+            tensor = tensor_list[0]
+        else:
+            tensor_list = [
+                x.flatten() if isinstance(x, torch.Tensor) else x for x in tensor_list
+            ]
+            tensor = torch.concat(tensor_list)
+    if is_cuda_alike():
         return gpu_tensor_hash(tensor.cuda())
     tensor = tensor.detach().contiguous()
 
@@ -811,4 +918,7 @@ def hash_feature(f):
         return data_hash(arr_bytes)
     elif isinstance(f, torch.Tensor):
         return tensor_hash([f])
+    elif isinstance(f, CudaIpcTensorTransportProxy):
+        reconstruct_t = f.reconstruct_on_target_device(torch.cuda.current_device())
+        return tensor_hash([reconstruct_t])
     return data_hash(f)

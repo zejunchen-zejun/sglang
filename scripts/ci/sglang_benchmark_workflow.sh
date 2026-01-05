@@ -7,30 +7,57 @@ model_name=${2:-Qwen3-VL-235B}
 model_path=${3:-/models/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic/}
 TP=${4:-8}
 EP=${5:-8}
+TIMEOUT=${6:-60}
 
 export SGLANG_TORCH_PROFILER_DIR=./
 export SGLANG_PROFILE_WITH_STACK=1
 export SGLANG_PROFILE_RECORD_SHAPES=1
+echo "GPU_ARCHS: ${GPU_ARCHS}"
+echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}"
+
+echo "Dectect TYPE ${TYPE}"
+echo "Detect model_name: ${model_name}"
+echo "Detect model_path ${model_path}"
+echo "Detect TP ${TP}"
+echo "Detect EP ${EP}"
+echo "Detect TIMEOUT ${TIMEOUT}"
+
 
 if [[ "${TYPE}" == "launch" ]]; then
     echo
     echo "========== LAUNCHING SERVER ========"
     if [[ "${model_name}" == "Qwen3-VL-235B" ]]; then
+        export SGLANG_USE_AITER=1
+        echo "********** AOT Prebuild aiter kernel start ... **********"
+        cd /aiter
+        python3 op_tests/test_rope.py
+        python3 op_tests/test_layernorm2d.py
+        python3 op_tests/test_rmsnorm2d.py
+        python3 op_tests/test_rmsnorm2dFusedAddQuant.py
+        python3 op_tests/test_trtllm_all_reduce_fusion.py
+        echo "********** AOT Prebuild aiter kernel finished ... **********"
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
             --port 9000 \
             --tp-size "${TP}" \
-            --ep-size "${EP}" \
             --trust-remote-code \
             --chunked-prefill-size 32768 \
-            --mem-fraction-static 0.6 \
+            --mem-fraction-static 0.90 \
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
-            --cuda-graph-max-bs 128 &
+            --cuda-graph-max-bs 128 \
+            --page-size 1024 \
+            --mm-attention-backend aiter_attn \
+            --mm-enable-dp-encoder \
+            --enable-aiter-allreduce-fusion \
+            --kv-cache-dtype fp8_e4m3 \
+            --mm-processor-kwargs '{"max_pixels": 1638400, "min_pixels": 740}' \
+            --watchdog-timeout 1200 &
         sglang_pid=$!
     elif [[ "${model_name}" == "Qwen3-next" ]]; then
         export SGLANG_USE_AITER=1
+        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \
@@ -43,8 +70,71 @@ if [[ "${TYPE}" == "launch" ]]; then
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 256 \
-            --page-size 64 \
-            --attention-backend triton &
+            --page-size 1024 \
+            --attention-backend triton \
+            --max-running-requests 128 \
+            --kv-cache-dtype fp8_e4m3 \
+            --watchdog-timeout 1200 &
+        sglang_pid=$!
+    elif [[ "${model_name}" == "Qwen3-Omni" ]]; then
+        echo "Qwen3-Omni-Server Launch"
+        export SGLANG_USE_CUDA_IPC_TRANSPORT=1
+        export SGLANG_VLM_CACHE_SIZE_MB=8192
+        export SGLANG_USE_AITER=1
+        export USE_PA=1
+        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
+        export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
+        export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=0
+        export ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+        echo "********** AOT Prebuild aiter kernel start ... **********"
+        cd /aiter
+        python3 op_tests/test_rope.py
+        python3 op_tests/test_layernorm2d.py
+        python3 op_tests/test_rmsnorm2d.py
+        python3 op_tests/test_rmsnorm2dFusedAddQuant.py
+        python3 op_tests/test_trtllm_all_reduce_fusion.py
+        echo "********** AOT Prebuild aiter kernel finished ... **********"
+        python3 -m sglang.launch_server \
+            --model-path "${model_path}" \
+            --host localhost \
+            --port 9000 \
+            --tp-size ${TP} \
+            --trust-remote-code \
+            --mm-attention-backend "aiter_attn"\
+            --chunked-prefill-size 32768 \
+            --mem-fraction-static 0.85 \
+            --disable-radix-cache \
+            --max-prefill-tokens 32768 \
+            --cuda-graph-max-bs 8 \
+            --page-size 1024  \
+            --mm-enable-dp-encoder \
+            --kv-cache-dtype fp8_e4m3 \
+            --enable-aiter-allreduce-fusion \
+            --max-running-requests 128 \
+            --watchdog-timeout 1200 &
+        sglang_pid=$!
+    elif [[ "${model_name}" == "Qwen3-235B-A22B-Instruct-2507-FP8-Dynamic" ]]; then
+        export SGLANG_USE_AITER=1
+        export AITER_ROPE_FUSED_QKNORM=1
+        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
+        export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
+        export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=1
+        python3 -m sglang.launch_server \
+            --model-path "${model_path}" \
+            --host localhost \
+            --port 9000 \
+            --tp-size ${TP} \
+            --disable-radix-cache \
+            --trust-remote-code \
+            --max-prefill-tokens 65536 \
+            --context-length 65536 \
+            --page-size 16 \
+            --max-running-requests 512 \
+            --chunked-prefill-size 65536 \
+            --mem-fraction-static 0.9 \
+            --mm-attention-backend aiter_attn \
+            --enable-aiter-allreduce-fusion \
+            --watchdog-timeout 1200 &
         sglang_pid=$!
     else
         echo "Unknown model_name: ${model_name}"
@@ -53,7 +143,7 @@ if [[ "${TYPE}" == "launch" ]]; then
 
     echo
     echo "========== WAITING FOR SERVER TO BE READY ========"
-    max_retries=60
+    max_retries=${TIMEOUT}
     retry_interval=60
     for ((i=1; i<=max_retries; i++)); do
         if curl -s http://localhost:9000/v1/completions -o /dev/null; then
@@ -72,14 +162,12 @@ if [[ "${TYPE}" == "launch" ]]; then
 
     echo
     echo "========== TESTING SERVER ========"
-    echo "Downloading test image"
-    wget https://sf-maas-uat-prod.oss-cn-shanghai.aliyuncs.com/dog.png
     echo "Testing server with test image"
     curl --request POST \
         --url "http://localhost:9000/v1/chat/completions" \
         --header "Content-Type: application/json" \
         --data '{
-            "model": "${model}",
+            "model": "${model_path}",
             "messages": [
                 {
                 "role": "user",
@@ -87,7 +175,7 @@ if [[ "${TYPE}" == "launch" ]]; then
                     {
                     "type": "image_url",
                     "image_url": {
-                        "url": "dog.png"
+                        "url": "https://sf-maas-uat-prod.oss-cn-shanghai.aliyuncs.com/dog.png"
                     }
                     },
                     {

@@ -20,6 +20,7 @@ from typing import Callable, Iterable, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from transformers.activations import ACT2FN
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
@@ -32,6 +33,7 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.layernorm import LayerNorm
 from sglang.srt.layers.linear import ColumnParallelLinear, RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.pooler import Pooler, PoolingType
@@ -46,10 +48,6 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalDataItem,
     MultimodalInputs,
 )
-from sglang.srt.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.qwen3 import Qwen3Model
@@ -57,15 +55,23 @@ from sglang.srt.multimodal.mm_utils import (
     init_all_vision_forward_metadata,
     run_dp_sharded_mrope_vision_model,
 )
+from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, get_bool_env_var, is_hip
 from sglang.srt.utils.hf_transformers_utils import get_processor
 
-from sglang.srt.server_args import get_global_server_args
-
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_use_aiter_fast_gelu = False
 
 logger = logging.getLogger(__name__)
+
+if _use_aiter:
+    try:
+        from aiter import gelu_fast_vec
+        _use_aiter_fast_gelu = True
+    except Exception:
+        logger.warning("WARNING: from aiter import gelu_fast_vec failed, fallback to default torch ops")
+        _use_aiter_fast_gelu = False
 
 
 # === Vision Encoder === #
@@ -110,7 +116,12 @@ class Qwen3_VisionMLP(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x_fc1, _ = self.linear_fc1(x)
-        mlp_output, _ = self.linear_fc2(self.act(x_fc1))
+        if _use_aiter and _use_aiter_fast_gelu:
+            gelu_output= torch.empty_like(x_fc1)
+            gelu_fast_vec(gelu_output, x_fc1)
+            mlp_output, _ = self.linear_fc2(gelu_output)
+        else:
+            mlp_output, _ = self.linear_fc2(self.act(x_fc1))
         return mlp_output
 
 
@@ -159,10 +170,14 @@ class Qwen3_VisionBlock(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        residual: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
-            norm_layer = partial(nn.LayerNorm, eps=1e-6)
+            if _use_aiter:
+                norm_layer = partial(LayerNorm, eps=1e-6)
+            else:
+                norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
 
@@ -212,8 +227,15 @@ class Qwen3_VisionBlock(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.norm1(x)
+        # First norm
+        if residual is None:
+            hidden_states = self.norm1(x)
+            residual = x
+        else:
+            hidden_states, residual = self.norm1(x, residual=residual)
+
         hidden_states = rearrange(hidden_states, "s b ... -> b s ...")
         attn = self.attn(
             hidden_states,
@@ -221,11 +243,17 @@ class Qwen3_VisionBlock(nn.Module):
             position_embeddings=position_embeddings,
         )
         attn = rearrange(attn, "b s ... -> s b ...")
-        x += attn
-        norm2 = self.norm2(x)
+
+        # Fused add + norm2
+        if isinstance(self.norm2, LayerNorm):
+            norm2, x = self.norm2(attn, residual=residual)
+        else:
+            x = x + attn
+            norm2 = self.norm2(x)
+
+        # MLP and final residual
         mlp = self.mlp(norm2)
-        x += mlp
-        return x
+        return mlp, x
 
 
 class Qwen3VLMoeVisionPatchMerger(nn.Module):
@@ -274,11 +302,23 @@ class Qwen3VLMoeVisionPatchMerger(nn.Module):
             tp_rank=tp_rank,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, residual: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         if self.use_postshuffle_norm:
-            x = self.norm(x.view(-1, self.hidden_size))
+            if residual is not None:
+                x, _ = self.norm(
+                    x.view(-1, self.hidden_size),
+                    residual=residual.view(-1, self.hidden_size),
+                )
+            else:
+                x = self.norm(x.view(-1, self.hidden_size))
         else:
-            x = self.norm(x).view(-1, self.hidden_size)
+            if residual is not None:
+                x, _ = self.norm(x, residual=residual)
+                x = x.view(-1, self.hidden_size)
+            else:
+                x = self.norm(x).view(-1, self.hidden_size)
 
         x_parallel, _ = self.linear_fc1(x)
         x_parallel = self.act_fn(x_parallel)
@@ -300,6 +340,7 @@ class Qwen3VLMoeVisionModel(nn.Module):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.num_position_embeddings = vision_config.num_position_embeddings
+        self.num_grid_per_side = int(vision_config.num_position_embeddings**0.5)
         self.patch_size = vision_config.patch_size
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
@@ -313,7 +354,10 @@ class Qwen3VLMoeVisionModel(nn.Module):
             1 + len(self.deepstack_visual_indexes)
         )
 
-        norm_layer = partial(nn.LayerNorm, eps=norm_eps)
+        if _use_aiter:
+            norm_layer = partial(LayerNorm, eps=norm_eps)
+        else:
+            norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
@@ -325,7 +369,9 @@ class Qwen3VLMoeVisionModel(nn.Module):
                     intermediate_dim=vision_config.intermediate_size,
                     hidden_act=vision_config.hidden_act,
                     norm_layer=norm_layer,
-                    attn_implementation="flash_attention_2" if _is_hip else "flash_attention_3",
+                    attn_implementation=(
+                        "flash_attention_2" if _is_hip else "flash_attention_3"
+                    ),
                     quant_config=quant_config,
                     prefix=add_prefix(f"blocks.{layer_idx}", prefix),
                     use_data_parallel=use_data_parallel,
@@ -397,90 +443,53 @@ class Qwen3VLMoeVisionModel(nn.Module):
         return rotary_pos_emb
 
     def fast_pos_embed_interpolate(self, grid_thw):
-        num_grid_per_side = int(self.num_position_embeddings**0.5)
-
-        idx_list = [[] for _ in range(4)]
-        weight_list = [[] for _ in range(4)]
-
-        # TODO: use torch instand of np
-        for t, h, w in grid_thw:
-            h_idxs = np.linspace(0, num_grid_per_side - 1, h)
-            w_idxs = np.linspace(0, num_grid_per_side - 1, w)
-
-            h_idxs_floor = h_idxs.astype(int)
-            w_idxs_floor = w_idxs.astype(int)
-            h_idxs_ceil = (h_idxs.astype(int) + 1).clip(max=num_grid_per_side - 1)
-            w_idxs_ceil = (w_idxs.astype(int) + 1).clip(max=num_grid_per_side - 1)
-
-            dh = h_idxs - h_idxs_floor
-            dw = w_idxs - w_idxs_floor
-
-            idx_list[0].extend(
-                ((h_idxs_floor * num_grid_per_side)[None].T + w_idxs_floor[None])
-                .flatten()
-                .tolist()
-                * t
-            )
-            idx_list[1].extend(
-                ((h_idxs_floor * num_grid_per_side)[None].T + w_idxs_ceil[None])
-                .flatten()
-                .tolist()
-                * t
-            )
-            idx_list[2].extend(
-                ((h_idxs_ceil * num_grid_per_side)[None].T + w_idxs_floor[None])
-                .flatten()
-                .tolist()
-                * t
-            )
-            idx_list[3].extend(
-                ((h_idxs_ceil * num_grid_per_side)[None].T + w_idxs_ceil[None])
-                .flatten()
-                .tolist()
-                * t
-            )
-
-            weight_list[0].extend(
-                ((1 - dh)[None].T * (1 - dw)[None]).flatten().tolist() * t
-            )
-            weight_list[1].extend(((1 - dh)[None].T * dw[None]).flatten().tolist() * t)
-            weight_list[2].extend((dh[None].T * (1 - dw)[None]).flatten().tolist() * t)
-            weight_list[3].extend((dh[None].T * dw[None]).flatten().tolist() * t)
-
-        device = self.pos_embed.weight.device
-        dtype = self.pos_embed.weight.dtype
-
-        p0 = (
-            self.pos_embed(torch.tensor(idx_list[0], dtype=torch.long, device=device))
-            * torch.tensor(weight_list[0], dtype=dtype, device=device)[:, None]
-        )
-        p1 = (
-            self.pos_embed(torch.tensor(idx_list[1], dtype=torch.long, device=device))
-            * torch.tensor(weight_list[1], dtype=dtype, device=device)[:, None]
-        )
-        p2 = (
-            self.pos_embed(torch.tensor(idx_list[2], dtype=torch.long, device=device))
-            * torch.tensor(weight_list[2], dtype=dtype, device=device)[:, None]
-        )
-        p3 = (
-            self.pos_embed(torch.tensor(idx_list[3], dtype=torch.long, device=device))
-            * torch.tensor(weight_list[3], dtype=dtype, device=device)[:, None]
-        )
-
-        patch_pos_embeds = p0 + p1 + p2 + p3
-        patch_pos_embeds = patch_pos_embeds.split([t * h * w for t, h, w in grid_thw])
-        patch_pos_embeds_permute = []
+        num_grid_per_side = self.num_grid_per_side
         m_size = self.spatial_merge_size
-        for pos_embed, (t, h, w) in zip(patch_pos_embeds, grid_thw):
-            pos_embed = (
-                pos_embed.view(t, h // m_size, m_size, w // m_size, m_size, -1)
-                .permute(0, 1, 3, 2, 4, 5)
-                .flatten(0, 4)
+        hidden_dim = self.pos_embed.embedding_dim
+        outputs = []
+        for t, h, w in grid_thw:
+            h_idxs = torch.linspace(
+                0, num_grid_per_side - 1, h, dtype=torch.float32, device=self.device
             )
-            patch_pos_embeds_permute.append(pos_embed)
-        patch_pos_embeds = torch.cat(patch_pos_embeds_permute)
-        return patch_pos_embeds
+            w_idxs = torch.linspace(
+                0, num_grid_per_side - 1, w, dtype=torch.float32, device=self.device
+            )
+            h_floor = h_idxs.to(torch.long)
+            w_floor = w_idxs.to(torch.long)
+            h_ceil = torch.clamp(h_floor + 1, max=num_grid_per_side - 1)
+            w_ceil = torch.clamp(w_floor + 1, max=num_grid_per_side - 1)
 
+            dh = h_idxs - h_floor
+            dw = w_idxs - w_floor
+
+            dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
+            h_floor_grid, w_floor_grid = torch.meshgrid(h_floor, w_floor, indexing="ij")
+            h_ceil_grid, w_ceil_grid = torch.meshgrid(h_ceil, w_ceil, indexing="ij")
+
+            w11 = dh_grid * dw_grid
+            w10 = dh_grid - w11
+            w01 = dw_grid - w11
+            w00 = 1 - dh_grid - w01
+
+            h_grid = torch.stack([h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid])
+            w_grid = torch.stack([w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid])
+            h_grid_idx = h_grid * num_grid_per_side
+
+            indices = (h_grid_idx + w_grid).reshape(4, -1)
+            weights = torch.stack([w00, w01, w10, w11], dim=0).reshape(4, -1, 1)
+            weights = weights.to(dtype=self.dtype)
+
+            embeds = self.pos_embed(indices)
+            embeds *= weights
+            combined = embeds.sum(dim=0)
+
+            combined = combined.reshape(
+                h // m_size, m_size, w // m_size, m_size, hidden_dim
+            )
+            combined = combined.permute(0, 2, 1, 3, 4).reshape(1, -1, hidden_dim)
+            repeated = combined.expand(t, -1, -1).reshape(-1, hidden_dim)
+            outputs.append(repeated)
+        return torch.cat(outputs, dim=0)
     def forward(
         self,
         x: torch.Tensor,
@@ -516,15 +525,22 @@ class Qwen3VLMoeVisionModel(nn.Module):
 
         deepstack_feature_lists = []
         num_deepstack_captured = 0
+        residual = None
         for layer_num, blk in enumerate(self.blocks):
-            x = blk(x, cu_seqlens=cu_seqlens, position_embeddings=position_embeddings)
+            x, residual = blk(
+                x,
+                cu_seqlens=cu_seqlens,
+                position_embeddings=position_embeddings,
+                residual=residual,
+            )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = self.deepstack_merger_list[num_deepstack_captured](
-                    x
+                    x, residual=residual
                 )
                 deepstack_feature_lists.append(deepstack_feature)
                 num_deepstack_captured += 1
-        x = self.merger(x)
+
+        x = self.merger(x, residual=residual)
         hidden_states = torch.cat(
             [x] + deepstack_feature_lists, dim=1
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
@@ -659,7 +675,6 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         super().__init__()
         self.use_data_parallel = get_global_server_args().mm_enable_dp_encoder
 
-
         self.visual = Qwen3VLMoeVisionModel(
             config.vision_config,
             # NOTE: Qwen3-VL vision encoder currently supports BitsAndBytes 4-bit quantization.
@@ -667,7 +682,7 @@ class Qwen3VLForConditionalGeneration(nn.Module):
             quant_config=quant_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             prefix=add_prefix("visual", prefix),
-            use_data_parallel=self.use_data_parallel
+            use_data_parallel=self.use_data_parallel,
         )
 
         # TODO: make it more elegant
@@ -731,7 +746,8 @@ class Qwen3VLForConditionalGeneration(nn.Module):
                 self.visual, pixel_values, image_grid_thw.tolist(), rope_type="rope_3d"
             )
         else:
-            init_all_vision_forward_metadata(self.visual, image_grid_thw, pixel_values)
+            if _use_aiter:
+                init_all_vision_forward_metadata(self.visual, image_grid_thw, pixel_values)
             image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
         return image_embeds
 
@@ -743,21 +759,13 @@ class Qwen3VLForConditionalGeneration(nn.Module):
         video_grid_thw = torch.concat([item.video_grid_thw for item in items], dim=0)
         assert pixel_values.dim() == 2, pixel_values.dim()
         assert video_grid_thw.dim() == 2, video_grid_thw.dim()
-        if _use_aiter:
-            for i, block in enumerate(self.visual.blocks):
-                if i == 0:
-                    vision_forward_metadata = block.attn.init_vision_forward_metadata(
-                        video_grid_thw, pixel_values
-                    )
-                else:
-                    block.attn.set_vision_forward_metadata(vision_forward_metadata)
-
         if self.use_data_parallel:
             return run_dp_sharded_mrope_vision_model(
                 self.visual, pixel_values, video_grid_thw.tolist(), rope_type="rope_3d"
             )
         else:
-            init_all_vision_forward_metadata(self.visual, video_grid_thw, pixel_values)
+            if _use_aiter:
+                init_all_vision_forward_metadata(self.visual, video_grid_thw, pixel_values)
             video_embeds = self.visual(pixel_values, grid_thw=video_grid_thw)
         return video_embeds
 

@@ -59,6 +59,7 @@ from sglang.srt.disaggregation.utils import (
     prepare_abort,
 )
 from sglang.srt.distributed import get_pp_group, get_world_group
+from sglang.srt.distributed.device_communicators.shm_broadcast import MessageQueue
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
@@ -356,6 +357,9 @@ class Scheduler(
         self.pp_group = get_pp_group()
         self.world_group = get_world_group()
 
+        # Init MessageQueue for TP communication (replaces broadcast_pyobj)
+        self.init_message_queues()
+
         self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
         set_random_seed(self.random_seed)
 
@@ -599,6 +603,86 @@ class Scheduler(
         else:
             self.draft_worker = None
 
+    def init_message_queues(self):
+        """
+        Initialize MessageQueue for TP communication.
+
+        Replaces broadcast_pyobj with zero-copy shared memory communication.
+        Uses sglang's MessageQueue (adapted from vLLM) for efficient IPC.
+        Only initialized when tp_size > 1.
+        """
+        self.tp_mq = None
+        self.attn_tp_mq = None
+        self.is_tp_mq_writer = False
+        self.is_attn_tp_mq_writer = False
+
+        # Initialize MessageQueue for TP group using the convenient API
+        if self.tp_size > 1:
+            writer_rank = 0  # First rank in TP group is always the writer
+            max_chunk_bytes = 2 * 1024 * 1024 * 1024  # 2 GB per chunk
+            max_chunks = 8  # Support up to 8 pending messages
+
+            try:
+                # Use create_from_process_group - handles all the setup automatically
+                self.tp_mq = MessageQueue.create_from_process_group(
+                    pg=self.tp_cpu_group,  # Use CPU group (Gloo backend)
+                    max_chunk_bytes=max_chunk_bytes,
+                    max_chunks=max_chunks,
+                    writer_rank=writer_rank,
+                )
+
+                # Track writer status for logging
+                self.is_tp_mq_writer = self.tp_rank == writer_rank
+
+                if self.is_tp_mq_writer:
+                    logger.info(
+                        f"TP Rank {self.tp_rank}: Created MessageQueue as writer "
+                        f"(world_size={self.tp_size}, max_chunk={max_chunk_bytes / 1024**3:.1f}GB)"
+                    )
+                else:
+                    logger.info(
+                        f"TP Rank {self.tp_rank}: Connected to MessageQueue as reader"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to create MessageQueue for TP group: {e}. "
+                    "Falling back to broadcast_pyobj."
+                )
+                self.tp_mq = None
+        if self.server_args.enable_dp_attention and self.attn_tp_size > 1:
+            writer_rank = 0  # First rank in attention TP group is the writer
+            max_chunk_bytes = 2 * 1024 * 1024 * 1024  # 2 GB per chunk
+            max_chunks = 8
+
+            try:
+                # Use create_from_process_group for attention TP group
+                self.attn_tp_mq = MessageQueue.create_from_process_group(
+                    pg=self.attn_tp_cpu_group,  # Use attention CPU group
+                    max_chunk_bytes=max_chunk_bytes,
+                    max_chunks=max_chunks,
+                    writer_rank=writer_rank,
+                )
+
+                # Track writer status
+                self.is_attn_tp_mq_writer = self.attn_tp_rank == writer_rank
+
+                if self.is_attn_tp_mq_writer:
+                    logger.info(
+                        f"Attention TP Rank {self.attn_tp_rank}: "
+                        f"Created MessageQueue as writer (world_size={self.attn_tp_size})"
+                    )
+                else:
+                    logger.info(
+                        f"Attention TP Rank {self.attn_tp_rank}: "
+                        "Connected to MessageQueue as reader"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to create MessageQueue for Attention TP group: {e}. "
+                    "Falling back to broadcast_pyobj."
+                )
+                self.attn_tp_mq = None
+
     def init_sockets(self, server_args: ServerArgs, port_args: PortArgs):
         context = zmq.Context(2)
         self.idle_sleeper = None
@@ -699,6 +783,7 @@ class Scheduler(
                     trust_remote_code=server_args.trust_remote_code,
                     revision=server_args.revision,
                     use_fast=not server_args.disable_fast_image_processor,
+                    mm_processor_kwargs_set=bool(server_args.mm_processor_kwargs),
                 )
                 self.tokenizer = get_tokenizer_from_processor(self.processor)
             else:
@@ -1100,6 +1185,7 @@ class Scheduler(
                 work_reqs = None
                 control_reqs = None
 
+            # Distribute work_reqs via broadcast_pyobj
             if self.attn_tp_size != 1:
                 work_reqs = broadcast_pyobj(
                     work_reqs,
@@ -1107,6 +1193,8 @@ class Scheduler(
                     self.attn_tp_cpu_group,
                     src=self.attn_tp_group.ranks[0],
                 )
+
+            # Distribute control_reqs via broadcast_pyobj
             if self.tp_size != 1:
                 control_reqs = broadcast_pyobj(
                     control_reqs,
@@ -1116,6 +1204,7 @@ class Scheduler(
                 )
             recv_reqs = work_reqs + control_reqs
         elif self.tp_size != 1:
+            # Distribute all requests via broadcast_pyobj
             recv_reqs = broadcast_pyobj(
                 recv_reqs,
                 self.tp_group.rank,
@@ -2724,14 +2813,17 @@ def run_scheduler_process(
         prefix += f" PP{pp_rank}"
 
     # Config the process
+
     setproctitle.setproctitle(f"sglang::scheduler{prefix.replace(' ', '_')}")
     faulthandler.enable()
     kill_itself_when_parent_died()
     parent_process = psutil.Process().parent()
 
-    # Configure the logger
+    # Configure the logger (must be called before logging)
     configure_logger(server_args, prefix=prefix)
     suppress_other_loggers()
+    
+
 
     # Set cpu affinity to this gpu process
     if get_bool_env_var("SGLANG_SET_CPU_AFFINITY"):
