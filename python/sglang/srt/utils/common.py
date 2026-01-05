@@ -88,6 +88,8 @@ from torch import nn
 from torch.library import Library
 from torch.profiler import ProfilerActivity, profile, record_function
 from torch.utils._contextlib import _DecoratorContextManager
+from torchvision.io import ImageReadMode, decode_image, read_image
+from torchvision.transforms.v2 import functional as F
 from typing_extensions import Literal
 
 from sglang.srt.environ import envs
@@ -871,6 +873,107 @@ def load_image(
         raise ValueError(f"Invalid image: {image_file}")
 
     return image, image_size
+
+
+def load_image_tensor(
+    image_file: Union[Image.Image, str, ImageData, bytes],
+    discard_alpha_channel: bool = True,
+) -> tuple[Image.Image, tuple[int, int]]:
+    """
+    Load image, prioritize using torchvision for hardware-accelerated decoding
+    Return PIL Image for backward compatibility
+    """
+    if isinstance(image_file, ImageData):
+        image_file = image_file.url
+
+    image = image_size = None
+
+    if isinstance(image_file, Image.Image):
+        # Already a PIL Image object
+        image = image_file
+        image_size = (image.width, image.height)
+        img_tensor = F.pil_to_tensor(image)
+
+    elif isinstance(image_file, bytes):
+        # bytes format - prioritize torchvision decoding
+        try:
+            img_tensor_bytes = torch.frombuffer(
+                bytearray(image_file), dtype=torch.uint8
+            )
+            img_tensor = decode_image(img_tensor_bytes, mode=ImageReadMode.RGB)
+        except Exception:
+            # Fallback to PIL
+            image = Image.open(BytesIO(image_file))
+            if discard_alpha_channel and image.mode != "RGB":
+                image = image.convert("RGB")
+            img_tensor = F.pil_to_tensor(image)
+
+    elif image_file.startswith("http://") or image_file.startswith("https://"):
+        # HTTP/HTTPS URL
+        timeout = int(os.getenv("REQUEST_TIMEOUT", "3"))
+        response = requests.get(image_file, stream=True, timeout=timeout)
+        try:
+            response.raise_for_status()
+            # Read to memory and decode with torchvision
+            img_bytes = response.content
+            try:
+                img_tensor_bytes = torch.frombuffer(
+                    bytearray(img_bytes), dtype=torch.uint8
+                )
+                img_tensor = decode_image(img_tensor_bytes, mode=ImageReadMode.RGB)
+            except Exception:
+                # Fallback to PIL
+                image = Image.open(BytesIO(img_bytes))
+                if discard_alpha_channel and image.mode != "RGB":
+                    image = image.convert("RGB")
+                img_tensor = F.pil_to_tensor(image)
+        finally:
+            response.close()
+
+    elif image_file.lower().endswith(("png", "jpg", "jpeg", "webp", "gif")):
+        # Local file path - use torchvision for direct reading (fastest)
+        try:
+            img_tensor = read_image(image_file, mode=ImageReadMode.RGB)
+        except Exception:
+            # Fallback to PIL
+            image = Image.open(image_file)
+            if discard_alpha_channel and image.mode != "RGB":
+                image = image.convert("RGB")
+            img_tensor = F.pil_to_tensor(image)
+
+    elif image_file.startswith("data:"):
+        # data URL format: data:image/jpeg;base64,/9j/4AAQ...
+        base64_str = image_file.split(",")[1]
+        img_bytes = pybase64.b64decode(base64_str, validate=True)
+
+        # Decode with torchvision
+        try:
+            img_tensor_bytes = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
+            img_tensor = decode_image(img_tensor_bytes, mode=ImageReadMode.RGB)
+        except Exception:
+            # Fallback to PIL
+            image = Image.open(BytesIO(img_bytes))
+            if discard_alpha_channel and image.mode != "RGB":
+                image = image.convert("RGB")
+            img_tensor = F.pil_to_tensor(image)
+    elif isinstance(image_file, str):
+        # Pure base64 string
+        img_bytes = pybase64.b64decode(image_file, validate=True)
+
+        # Decode with torchvision
+        try:
+            img_tensor_bytes = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
+            img_tensor = decode_image(img_tensor_bytes, mode=ImageReadMode.RGB)
+        except Exception:
+            # Fallback to PIL
+            image = Image.open(BytesIO(img_bytes))
+            if discard_alpha_channel and image.mode != "RGB":
+                image = image.convert("RGB")
+            img_tensor = F.pil_to_tensor(image)
+    else:
+        raise ValueError(f"Invalid image: {image_file}")
+
+    return img_tensor, image_size
 
 
 def get_image_bytes(image_file: Union[str, bytes]):
@@ -3573,3 +3676,79 @@ def calc_diff(x, y):
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
+
+
+def distribute_requests_via_mq(
+    reqs: Optional[List[Any]],
+    mq: Any,  # MessageQueue from sglang
+    device_workgroup,
+    rank: int,
+    writer_rank: int,
+) -> List[Any]:
+    """
+    Distribute requests via MessageQueue (shared memory).
+
+    Replaces broadcast_pyobj with zero-copy communication.
+
+    Args:
+        reqs: Request list (only writer has valid data)
+        mq: MessageQueue instance
+        rank: Current rank
+        writer_rank: Writer's rank
+
+    Returns:
+        Request list (all ranks get the same data)
+    """
+    if rank == writer_rank:
+        # Writer: enqueue requests
+        if reqs is None or len(reqs) == 0:
+            # Send empty list for synchronization
+            mq.enqueue([[], []])
+        else:
+            feature_list = []
+            for idx, d in enumerate(reqs):
+                if hasattr(d, "mm_inputs") and d.mm_inputs is not None:
+                    if "mm_items" in d.mm_inputs.keys():
+                        for inner_idx, item in enumerate(d.mm_inputs["mm_items"]):
+                            if item.feature is not None:
+                                feature_list.append((idx, inner_idx, item.feature))
+                                item.feature = None
+            num_feat = len(feature_list)
+            num_dim = 0
+            if num_feat > 0:
+                num_dim = feature_list[0][2].dim()
+            metadata = [num_feat, num_dim]
+            tensor_metadata = [(f[0], f[1], *f[2].shape) for f in feature_list]
+            metadata.extend(tensor_metadata)
+            # Send request list
+            mq.enqueue([metadata, reqs])
+
+            if num_feat > 0:
+                # Send tensors separately
+                for f in feature_list:
+                    dist.broadcast(f[2], src=writer_rank, group=device_workgroup)
+
+            for idx, feature in enumerate(feature_list):
+                req_id, inner_id = feature[0], feature[1]
+                reqs[req_id].mm_inputs["mm_items"][inner_id].feature = feature[2]
+
+        # Writer returns the original list
+        return reqs if reqs else []
+    else:
+        metadata, reqs = mq.dequeue()
+        if len(metadata) == 0:
+            return []
+        num_feat, num_dim = metadata[0], metadata[1]
+        tensor_metadata = metadata[2:]
+        if num_feat > 0:
+            feature_list = []
+            for idx in range(num_feat):
+                req_id, inner_id, *shape = tensor_metadata[idx]
+                tensor = torch.empty(shape, dtype=torch.float, device="cuda")
+                dist.broadcast(tensor, src=writer_rank, group=device_workgroup)
+                feature_list.append((req_id, inner_id, tensor))
+            for idx, feature in enumerate(feature_list):
+                req_id, inner_id = feature[0], feature[1]
+                reqs[req_id].mm_inputs["mm_items"][inner_id].feature = feature[2]
+
+        return reqs if reqs else []

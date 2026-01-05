@@ -68,8 +68,8 @@ from sglang.srt.utils import (
     add_prefix,
     get_bool_env_var,
     is_cuda,
-    is_hip,
     is_flashinfer_available,
+    is_hip,
     is_non_idle_and_non_empty,
 )
 
@@ -81,6 +81,11 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+if _use_aiter:
+    from aiter.rotary_embedding import AiterFusedSetKVBufferArg
+_use_aiter_rope_fused_qknorm = get_bool_env_var("AITER_ROPE_FUSED_QKNORM") and _use_aiter
+USING_PRESHUFFLE_LAYOUT = _use_aiter and get_bool_env_var("SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT")
+
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
     def __init__(
@@ -160,6 +165,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -364,6 +371,7 @@ class Qwen3MoeAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.alt_stream = alt_stream
+        self.aiter_enable_fused_set_kv_buffer = False
 
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
@@ -405,14 +413,37 @@ class Qwen3MoeAttention(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
-        if (
-            (isinstance(hidden_states, tuple) and hidden_states[0].shape[0] == 0)
-             or (isinstance(hidden_states, torch.Tensor) and hidden_states.shape[0] == 0)
+        if (isinstance(hidden_states, tuple) and hidden_states[0].shape[0] == 0) or (
+            isinstance(hidden_states, torch.Tensor) and hidden_states.shape[0] == 0
         ):
             return hidden_states, forward_batch, None
         qkv, _ = self.qkv_proj(hidden_states)
-        if _use_aiter and self.rope_scaling is not None and "aiter_rope_fused_qknorm" in self.rope_scaling:
+        if (
+            _use_aiter
+            and ((self.rope_scaling is not None and "aiter_rope_fused_qknorm" in self.rope_scaling)
+            or _use_aiter_rope_fused_qknorm)
+        ):
             assert self.k_norm.variance_epsilon == self.q_norm.variance_epsilon
+            layer_id = self.attn.layer_id
+            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
+            block_size = 1024  # Default fallback
+            if hasattr(forward_batch, 'attn_backend') and hasattr(forward_batch.attn_backend, 'page_size'):
+                block_size = forward_batch.attn_backend.page_size
+            elif hasattr(forward_batch.token_to_kv_pool, 'allocator') and hasattr(forward_batch.token_to_kv_pool.allocator, 'page_size'):
+                block_size = forward_batch.token_to_kv_pool.allocator.page_size
+            elif hasattr(forward_batch.token_to_kv_pool, 'page_size'):
+                block_size = forward_batch.token_to_kv_pool.page_size
+            x = 16 // k_buffer.element_size()
+            aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
+                kv_cache = (k_buffer, v_buffer),
+                cache_loc = forward_batch.out_cache_loc,
+                k_scale = 1.0,
+                v_scale = 1.0,
+                return_kv = True,
+                use_shuffle_layout = True,
+                block_size = block_size,
+                x = x,
+            )
             q, k, v = self.rotary_emb(
                 qkv,
                 self.q_norm.weight,
@@ -421,7 +452,9 @@ class Qwen3MoeAttention(nn.Module):
                 self.num_heads,
                 self.num_kv_heads,
                 self.k_norm.variance_epsilon,
+                fused_set_kv_buffer_arg=aiter_fused_set_kv_buffer_arg,
             )
+            self.aiter_enable_fused_set_kv_buffer = True
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q, k = self._apply_qk_norm(q, k)
@@ -452,7 +485,7 @@ class Qwen3MoeAttention(nn.Module):
             save_kv_cache=not (
                 enable_fused_set_kv_buffer(forward_batch)
                 and self.compatible_with_fused_kv_buffer
-            ),
+            ) and not self.aiter_enable_fused_set_kv_buffer,
         )
         output, _ = self.o_proj(attn_output)
         return output
@@ -562,7 +595,9 @@ class Qwen3MoeDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if _use_aiter and self.self_attn.qkv_proj.weight.dtype == getattr(torch, "float8_e4m3fnuz", None):
+        if _use_aiter and self.self_attn.qkv_proj.weight.dtype == getattr(
+            torch, "float8_e4m3fnuz", None
+        ):
             quant_format = "fp8_e4m3fnuz"
         else:
             quant_format = ""
@@ -573,9 +608,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
             forward_batch,
             quant_format,
         )
-        if (
-            (isinstance(hidden_states, tuple) and hidden_states[0].shape[0] != 0)
-             or (isinstance(hidden_states, torch.Tensor) and hidden_states.shape[0] != 0)
+        if (isinstance(hidden_states, tuple) and hidden_states[0].shape[0] != 0) or (
+            isinstance(hidden_states, torch.Tensor) and hidden_states.shape[0] != 0
         ):
             hidden_states = self.self_attn(
                 positions=positions,
