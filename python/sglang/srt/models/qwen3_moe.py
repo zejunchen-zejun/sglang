@@ -426,24 +426,39 @@ class Qwen3MoeAttention(nn.Module):
             assert self.k_norm.variance_epsilon == self.q_norm.variance_epsilon
             layer_id = self.attn.layer_id
             k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
-            block_size = 1024  # Default fallback
-            if hasattr(forward_batch, 'attn_backend') and hasattr(forward_batch.attn_backend, 'page_size'):
-                block_size = forward_batch.attn_backend.page_size
-            elif hasattr(forward_batch.token_to_kv_pool, 'allocator') and hasattr(forward_batch.token_to_kv_pool.allocator, 'page_size'):
-                block_size = forward_batch.token_to_kv_pool.allocator.page_size
-            elif hasattr(forward_batch.token_to_kv_pool, 'page_size'):
-                block_size = forward_batch.token_to_kv_pool.page_size
-            x = 16 // k_buffer.element_size()
-            aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
-                kv_cache = (k_buffer, v_buffer),
-                cache_loc = forward_batch.out_cache_loc,
-                k_scale = 1.0,
-                v_scale = 1.0,
-                return_kv = True,
-                use_shuffle_layout = True,
-                block_size = block_size,
-                x = x,
-            )
+            if USING_PRESHUFFLE_LAYOUT:
+                block_size = 1024  # Default fallback
+                if hasattr(forward_batch, 'attn_backend') and hasattr(forward_batch.attn_backend, 'page_size'):
+                    block_size = forward_batch.attn_backend.page_size
+                elif hasattr(forward_batch.token_to_kv_pool, 'allocator') and hasattr(forward_batch.token_to_kv_pool.allocator, 'page_size'):
+                    block_size = forward_batch.token_to_kv_pool.allocator.page_size
+                elif hasattr(forward_batch.token_to_kv_pool, 'page_size'):
+                    block_size = forward_batch.token_to_kv_pool.page_size
+                x = 16 // k_buffer.element_size()
+                aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
+                    kv_cache = (k_buffer, v_buffer),
+                    cache_loc = forward_batch.out_cache_loc,
+                    k_scale = 1.0,
+                    v_scale = 1.0,
+                    return_kv = True,
+                    use_shuffle_layout = True,
+                    block_size = block_size,
+                    x = x,
+                )
+            else:
+                aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
+                    kv_cache = (k_buffer, v_buffer),
+                    cache_loc = forward_batch.out_cache_loc,
+                    k_scale = self.attn.k_scale_float if forward_batch.forward_mode.is_extend() else 1.0,
+                    v_scale = self.attn.v_scale_float if forward_batch.forward_mode.is_extend() else 1.0,
+                    return_kv = True,
+                    use_shuffle_layout=False,
+                )
+                if aiter_fused_set_kv_buffer_arg.k_scale is None:
+                    aiter_fused_set_kv_buffer_arg.k_scale = 1.0
+                if aiter_fused_set_kv_buffer_arg.v_scale is None:
+                    aiter_fused_set_kv_buffer_arg.v_scale = 1.0
+
             q, k, v = self.rotary_emb(
                 qkv,
                 self.q_norm.weight,
