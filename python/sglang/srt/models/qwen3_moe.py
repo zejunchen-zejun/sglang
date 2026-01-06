@@ -85,7 +85,8 @@ if _use_aiter:
     from aiter.rotary_embedding import AiterFusedSetKVBufferArg
 _use_aiter_rope_fused_qknorm = get_bool_env_var("AITER_ROPE_FUSED_QKNORM") and _use_aiter
 USING_PRESHUFFLE_LAYOUT = _use_aiter and get_bool_env_var("SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT")
-
+USING_PA_RAGGED = _use_aiter and get_bool_env_var("USING_PA_RAGGED")
+logger.info(f"=================================USING_PA_RAGGED============================{USING_PA_RAGGED}=============")
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
     def __init__(
@@ -425,25 +426,39 @@ class Qwen3MoeAttention(nn.Module):
         ):
             assert self.k_norm.variance_epsilon == self.q_norm.variance_epsilon
             layer_id = self.attn.layer_id
-            k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
-            block_size = 1024  # Default fallback
-            if hasattr(forward_batch, 'attn_backend') and hasattr(forward_batch.attn_backend, 'page_size'):
-                block_size = forward_batch.attn_backend.page_size
-            elif hasattr(forward_batch.token_to_kv_pool, 'allocator') and hasattr(forward_batch.token_to_kv_pool.allocator, 'page_size'):
-                block_size = forward_batch.token_to_kv_pool.allocator.page_size
-            elif hasattr(forward_batch.token_to_kv_pool, 'page_size'):
-                block_size = forward_batch.token_to_kv_pool.page_size
-            x = 16 // k_buffer.element_size()
-            aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
-                kv_cache = (k_buffer, v_buffer),
-                cache_loc = forward_batch.out_cache_loc,
-                k_scale = 1.0,
-                v_scale = 1.0,
-                return_kv = True,
-                use_shuffle_layout = True,
-                block_size = block_size,
-                x = x,
-            )
+            if USING_PA_RAGGED:
+                assert not USING_PRESHUFFLE_LAYOUT, "AITER_PA_ASM_PRESHUFFLE_LAYOUT should disabled"
+                aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
+                    kv_cache = forward_batch.token_to_kv_pool.get_kv_buffer(layer_id),
+                    cache_loc = forward_batch.out_cache_loc,
+                    k_scale = self.attn.k_scale_float if forward_batch.forward_mode.is_extend() else 1.0,
+                    v_scale = self.attn.v_scale_float if forward_batch.forward_mode.is_extend() else 1.0,
+                    return_kv = True, 
+                )
+                if aiter_fused_set_kv_buffer_arg.k_scale is None:
+                    aiter_fused_set_kv_buffer_arg.k_scale = 1.0
+                if aiter_fused_set_kv_buffer_arg.v_scale is None:
+                    aiter_fused_set_kv_buffer_arg.v_scale = 1.0
+            else:
+                k_buffer, v_buffer = forward_batch.token_to_kv_pool.get_kv_buffer(layer_id)
+                block_size = 1024  # Default fallback
+                if hasattr(forward_batch, 'attn_backend') and hasattr(forward_batch.attn_backend, 'page_size'):
+                    block_size = forward_batch.attn_backend.page_size
+                elif hasattr(forward_batch.token_to_kv_pool, 'allocator') and hasattr(forward_batch.token_to_kv_pool.allocator, 'page_size'):
+                    block_size = forward_batch.token_to_kv_pool.allocator.page_size
+                elif hasattr(forward_batch.token_to_kv_pool, 'page_size'):
+                    block_size = forward_batch.token_to_kv_pool.page_size
+                x = 16 // k_buffer.element_size()
+                aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
+                    kv_cache = (k_buffer, v_buffer),
+                    cache_loc = forward_batch.out_cache_loc,
+                    k_scale = 1.0,
+                    v_scale = 1.0,
+                    return_kv = True,
+                    use_shuffle_layout = True,
+                    block_size = block_size,
+                    x = x,
+                )
             q, k, v = self.rotary_emb(
                 qkv,
                 self.q_norm.weight,

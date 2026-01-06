@@ -86,6 +86,7 @@ if [[ "${TYPE}" == "launch" ]]; then
         export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
         export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=0
         export ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+        export USING_PA_RAGGED=1
         echo "********** AOT Prebuild aiter kernel start ... **********"
         cd /aiter
         python3 op_tests/test_rope.py
