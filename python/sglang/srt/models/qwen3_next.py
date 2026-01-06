@@ -63,8 +63,9 @@ if _is_hip:
         fused_qkvzba_split_reshape_cat_decode,
         fused_qkvzba_split_reshape_cat_prefill,
     )
+
     fused_qkvzba_split_reshape_cat = fused_qkvzba_split_reshape_cat_decode
-    
+
 
 if _is_hip:
     from sglang.srt.layers.elementwise import fused_sigmoid_mul

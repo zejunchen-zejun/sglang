@@ -122,6 +122,7 @@ class Qwen2MoeMLP(nn.Module):
             )
         if _use_aiter:
             from aiter import silu_and_mul
+
             self.act_fn = silu_and_mul
         else:
             self.act_fn = SiluAndMul()
@@ -134,9 +135,11 @@ class Qwen2MoeMLP(nn.Module):
     ):
         gate_up, _ = self.gate_up_proj(x)
         if _use_aiter:
-            x = torch.empty((gate_up.shape[0], gate_up.shape[1] // 2),
-                                dtype=gate_up.dtype,
-                                device=gate_up.device)
+            x = torch.empty(
+                (gate_up.shape[0], gate_up.shape[1] // 2),
+                dtype=gate_up.dtype,
+                device=gate_up.device,
+            )
             self.act_fn(x, gate_up)
         else:
             x = self.act_fn(gate_up)
@@ -228,10 +231,13 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             if self.shared_expert_gate is not None:
                 if _is_hip:
                     gate_output = self.shared_expert_gate(hidden_states)
-                    fused_sigmoid_mul_broadcast(gate_output, shared_output, out=shared_output)
+                    fused_sigmoid_mul_broadcast(
+                        gate_output, shared_output, out=shared_output
+                    )
                 else:
                     shared_output = (
-                        F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_output
+                        F.sigmoid(self.shared_expert_gate(hidden_states))
+                        * shared_output
                     )
         return shared_output
 

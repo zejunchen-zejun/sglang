@@ -70,7 +70,7 @@ def _causal_conv1d_update_split_qkv_kernel(
         ).to(tl.int64)
     else:
         conv_state_batch_coord = idx_seq
-        
+
     if USE_PAD_SLOT:
         if conv_state_batch_coord == pad_slot_id:
             return
@@ -96,14 +96,14 @@ def _causal_conv1d_update_split_qkv_kernel(
 
     # STEP 2: Update conv state (same as original)
     idx_tokens = tl.arange(0, NP2_STATELEN)
-    
+
     conv_state_ptrs_source = (
         conv_state_ptr
         + (conv_state_batch_coord * stride_conv_state_seq)
         + (idx_feats * stride_conv_state_dim)[None, :]
         + ((idx_tokens + seqlen) * stride_conv_state_tok)[:, None]
     )
-    
+
     mask = (
         (conv_state_batch_coord < num_cache_lines)
         & ((idx_tokens + seqlen) < state_len)[:, None]
@@ -114,7 +114,7 @@ def _causal_conv1d_update_split_qkv_kernel(
     VAL = state_len - seqlen
     x_base = x_ptr + (idx_seq * stride_x_seq) + (idx_feats * stride_x_dim)
     x_ptrs = x_base[None, :] + ((idx_tokens - VAL) * stride_x_token)[:, None]
-    
+
     mask_x = (
         (idx_tokens - VAL >= 0)[:, None]
         & (idx_tokens - VAL < seqlen)[:, None]
@@ -212,7 +212,7 @@ def _causal_conv1d_update_split_qkv_kernel(
             acc = acc / (1 + tl.exp(-acc))
 
         mask_feat = (idx_token < seqlen) & (idx_feats < dim)
-        
+
         # Query: idx_feats in [0, key_dim)
         is_query = idx_feats < key_dim
         q_feat_idx = idx_feats  # 0-based index within query
@@ -223,7 +223,7 @@ def _causal_conv1d_update_split_qkv_kernel(
             + q_feat_idx * stride_q_dim
         )
         tl.store(q_ptrs, acc, mask=mask_feat & is_query)
-        
+
         # Key: idx_feats in [key_dim, 2*key_dim)
         is_key = (idx_feats >= key_dim) & (idx_feats < 2 * key_dim)
         k_feat_idx = idx_feats - key_dim
@@ -234,7 +234,7 @@ def _causal_conv1d_update_split_qkv_kernel(
             + k_feat_idx * stride_k_dim
         )
         tl.store(k_ptrs, acc, mask=mask_feat & is_key)
-        
+
         # Value: idx_feats in [2*key_dim, 2*key_dim+value_dim)
         is_value = (idx_feats >= 2 * key_dim) & (idx_feats < 2 * key_dim + value_dim)
         v_feat_idx = idx_feats - 2 * key_dim
@@ -264,17 +264,17 @@ def causal_conv1d_update_split_qkv(
         activation = "silu" if activation is True else None
     elif activation is not None:
         assert activation in ["silu", "swish"]
-    
+
     unsqueeze = x.dim() == 2
     if unsqueeze:
         x = x.unsqueeze(-1)
-    
+
     batch, dim, seqlen = x.shape
     assert dim == 2 * key_dim + value_dim, f"dim {dim} != 2*{key_dim} + {value_dim}"
-    
+
     _, width = weight.shape
     num_cache_lines, _, state_len = conv_state.size()
-    
+
     # 创建输出 buffer（已经是分离的！）
     query = torch.empty(
         (batch, key_dim, seqlen),
@@ -291,17 +291,17 @@ def causal_conv1d_update_split_qkv(
         dtype=x.dtype,
         device=x.device,
     )
-    
+
     # Triton kernel launch
     stride_state_indices = (
         conv_state_indices.stride(0) if conv_state_indices is not None else 0
     )
     state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
-    
+
     BLOCK_N = 256
     grid = (batch, triton.cdiv(dim, BLOCK_N))
-    
+
     _causal_conv1d_update_split_qkv_kernel[grid](
         x_ptr=x,
         w_ptr=weight,
@@ -345,11 +345,10 @@ def causal_conv1d_update_split_qkv(
         USE_PAD_SLOT=pad_slot_id is not None,
         BLOCK_N=BLOCK_N,
     )
-    
+
     if unsqueeze:
         query = query.squeeze(-1)
         key = key.squeeze(-1)
         value = value.squeeze(-1)
-    
-    return query, key, value
 
+    return query, key, value

@@ -635,9 +635,7 @@ async def clear_hicache_storage_backend():
 async def start_profile_async(obj: Optional[ProfileReqInput] = None):
     """Start profiling."""
     if obj is None:
-        obj = ProfileReqInput(
-            output_dir="/mnt/md0/yixiongh/Qwen3_next/profile/kunlun_setting"
-        )
+        obj = ProfileReqInput()
 
     await _global_state.tokenizer_manager.start_profile(
         output_dir=obj.output_dir,
@@ -647,6 +645,7 @@ async def start_profile_async(obj: Optional[ProfileReqInput] = None):
         with_stack=obj.with_stack,
         record_shapes=obj.record_shapes,
         profile_by_stage=obj.profile_by_stage,
+        merge_profiles=obj.merge_profiles,
     )
     return Response(
         content="Start profiling.\n",

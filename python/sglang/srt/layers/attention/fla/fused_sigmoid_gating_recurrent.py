@@ -6,26 +6,29 @@ import triton.language as tl
 
 from sglang.srt.layers.attention.fla.utils import input_guard
 
+
 def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
 
 def get_cuda_autotune_config():
     return [
-        triton.Config({'BV': 8}, num_stages=3, num_warps=1),
+        triton.Config({"BV": 8}, num_stages=3, num_warps=1),
     ]
 
 
 def get_hip_autotune_config():
     return [
-        triton.Config({'BV': 64}, num_stages=1, num_warps=4),
+        triton.Config({"BV": 64}, num_stages=1, num_warps=4),
     ]
+
 
 def get_autotune_config():
     if is_cuda():
         return get_cuda_autotune_config()
     else:
         return get_hip_autotune_config()
+
 
 @triton.heuristics(
     {
@@ -35,7 +38,7 @@ def get_autotune_config():
 )
 @triton.autotune(
     configs=get_autotune_config(),
-    key=['K', 'V'],
+    key=["K", "V"],
 )
 @triton.jit(do_not_specialize=["T"])
 def fused_sigmoid_gating_delta_rule_update_kernel(
@@ -221,7 +224,7 @@ def fused_sigmoid_gating_delta_rule_update(
         assert scale > 0, "scale must be positive"
 
     o = q.new_empty(NK, *v.shape)
-    grid = lambda META: (NK, triton.cdiv(V, META['BV']), N * HV)
+    grid = lambda META: (NK, triton.cdiv(V, META["BV"]), N * HV)
 
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,

@@ -11,22 +11,45 @@ from sglang.srt.layers.attention.mamba.causal_conv1d_triton import PAD_SLOT_ID
 
 @triton.jit()
 def _causal_conv1d_fwd_split_kernel(
-    x_ptr, w_ptr, bias_ptr,
-    initial_states_ptr, cache_indices_ptr, has_initial_states_ptr, query_start_loc_ptr,
-    q_ptr, k_ptr, v_ptr,
-    key_dim: tl.constexpr, value_dim: tl.constexpr, dim: tl.constexpr,
-    seqlen: tl.int32, num_cache_lines: tl.constexpr,
-    stride_x_dim: tl.constexpr, stride_x_token: tl.constexpr,
-    stride_w_dim: tl.constexpr, stride_w_width: tl.constexpr,
-    stride_istate_seq: tl.constexpr, stride_istate_dim: tl.constexpr, stride_istate_token: tl.constexpr,
-    stride_q_token: tl.constexpr, stride_q_dim: tl.constexpr,
-    stride_k_token: tl.constexpr, stride_k_dim: tl.constexpr,
-    stride_v_token: tl.constexpr, stride_v_dim: tl.constexpr,
+    x_ptr,
+    w_ptr,
+    bias_ptr,
+    initial_states_ptr,
+    cache_indices_ptr,
+    has_initial_states_ptr,
+    query_start_loc_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    key_dim: tl.constexpr,
+    value_dim: tl.constexpr,
+    dim: tl.constexpr,
+    seqlen: tl.int32,
+    num_cache_lines: tl.constexpr,
+    stride_x_dim: tl.constexpr,
+    stride_x_token: tl.constexpr,
+    stride_w_dim: tl.constexpr,
+    stride_w_width: tl.constexpr,
+    stride_istate_seq: tl.constexpr,
+    stride_istate_dim: tl.constexpr,
+    stride_istate_token: tl.constexpr,
+    stride_q_token: tl.constexpr,
+    stride_q_dim: tl.constexpr,
+    stride_k_token: tl.constexpr,
+    stride_k_dim: tl.constexpr,
+    stride_v_token: tl.constexpr,
+    stride_v_dim: tl.constexpr,
     pad_slot_id: tl.constexpr,
-    HAS_BIAS: tl.constexpr, KERNEL_WIDTH: tl.constexpr, SILU_ACTIVATION: tl.constexpr,
-    HAS_INITIAL_STATES: tl.constexpr, HAS_CACHE: tl.constexpr,
-    IS_CONTINUOUS_BATCHING: tl.constexpr, USE_PAD_SLOT: tl.constexpr,
-    NP2_STATELEN: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    KERNEL_WIDTH: tl.constexpr,
+    SILU_ACTIVATION: tl.constexpr,
+    HAS_INITIAL_STATES: tl.constexpr,
+    HAS_CACHE: tl.constexpr,
+    IS_CONTINUOUS_BATCHING: tl.constexpr,
+    USE_PAD_SLOT: tl.constexpr,
+    NP2_STATELEN: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     """Fused causal conv1d + split q/k/v output for prefill."""
     conv_states_ptr = initial_states_ptr
@@ -59,11 +82,11 @@ def _causal_conv1d_fwd_split_kernel(
         conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq).to(tl.int64)
     else:
         conv_state_batch_coord = idx_seq
-        
+
     if USE_PAD_SLOT:
         if conv_state_batch_coord == pad_slot_id:
             return
-            
+
     conv_states_base = (
         conv_states_ptr
         + (conv_state_batch_coord * stride_conv_state_seq)
@@ -133,7 +156,10 @@ def _causal_conv1d_fwd_split_kernel(
                 )
                 conv_state = tl.load(conv_states_ptrs_source, mask, other=0.0)
                 VAL = state_len - seqlen
-                x_ptrs = x_base[None, :] + ((idx_tokens_conv - VAL) * stride_x_token)[:, None]
+                x_ptrs = (
+                    x_base[None, :]
+                    + ((idx_tokens_conv - VAL) * stride_x_token)[:, None]
+                )
                 mask_x = (
                     (idx_tokens_conv - VAL >= 0)[:, None]
                     & (idx_tokens_conv - VAL < seqlen)[:, None]
@@ -143,14 +169,20 @@ def _causal_conv1d_fwd_split_kernel(
                 tl.debug_barrier()
                 new_conv_state = tl.where(mask, conv_state, loaded_x)
                 conv_states_ptrs_target = (
-                    conv_states_base + (idx_tokens_conv * stride_conv_state_tok)[:, None]
+                    conv_states_base
+                    + (idx_tokens_conv * stride_conv_state_tok)[:, None]
                 )
-                mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats < dim)[None, :]
+                mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats < dim)[
+                    None, :
+                ]
                 tl.store(conv_states_ptrs_target, new_conv_state, mask)
             else:
                 idx_tokens_conv = tl.arange(0, NP2_STATELEN)
                 VAL = state_len - seqlen
-                x_ptrs = x_base[None, :] + ((idx_tokens_conv - VAL) * stride_x_token)[:, None]
+                x_ptrs = (
+                    x_base[None, :]
+                    + ((idx_tokens_conv - VAL) * stride_x_token)[:, None]
+                )
                 mask_x = (
                     (idx_tokens_conv - VAL >= 0)[:, None]
                     & (idx_tokens_conv - VAL < seqlen)[:, None]
@@ -158,9 +190,12 @@ def _causal_conv1d_fwd_split_kernel(
                 )
                 new_conv_state = tl.load(x_ptrs, mask_x, 0.0)
                 conv_states_ptrs_target = (
-                    conv_states_base + (idx_tokens_conv * stride_conv_state_tok)[:, None]
+                    conv_states_base
+                    + (idx_tokens_conv * stride_conv_state_tok)[:, None]
                 )
-                mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats < dim)[None, :]
+                mask = (idx_tokens_conv < state_len)[:, None] & (idx_feats < dim)[
+                    None, :
+                ]
                 tl.store(conv_states_ptrs_target, new_conv_state, mask)
     else:
         prior_tokens = x_base + (token_offset - 1) * stride_x_token
@@ -169,11 +204,17 @@ def _causal_conv1d_fwd_split_kernel(
             col0 = tl.load(prior_tokens, mask_w, 0.0, cache_modifier=".ca")
         if KERNEL_WIDTH == 3:
             col1 = tl.load(prior_tokens, mask_w, 0.0, cache_modifier=".ca")
-            col0 = tl.load(prior_tokens - 1 * stride_x_token, mask_w, 0.0, cache_modifier=".ca")
+            col0 = tl.load(
+                prior_tokens - 1 * stride_x_token, mask_w, 0.0, cache_modifier=".ca"
+            )
         if KERNEL_WIDTH == 4:
             col2 = tl.load(prior_tokens, mask_w, 0.0, cache_modifier=".ca")
-            col1 = tl.load(prior_tokens - 1 * stride_x_token, mask_w, 0.0, cache_modifier=".ca")
-            col0 = tl.load(prior_tokens - 2 * stride_x_token, mask_w, 0.0, cache_modifier=".ca")
+            col1 = tl.load(
+                prior_tokens - 1 * stride_x_token, mask_w, 0.0, cache_modifier=".ca"
+            )
+            col0 = tl.load(
+                prior_tokens - 2 * stride_x_token, mask_w, 0.0, cache_modifier=".ca"
+            )
 
     if HAS_BIAS:
         bias = bias_ptr + idx_feats
@@ -199,7 +240,7 @@ def _causal_conv1d_fwd_split_kernel(
         acc = acc_preload
         matrix_w = w_col0
         matrix_x = col0
-        
+
         for j in tl.static_range(KERNEL_WIDTH):
             if KERNEL_WIDTH == 2:
                 if j == 1:
@@ -249,11 +290,19 @@ def _causal_conv1d_fwd_split_kernel(
         tl.store(q_ptrs, acc, mask=mask_feat & is_query)
 
         is_key = (idx_feats >= key_dim) & (idx_feats < 2 * key_dim)
-        k_ptrs = k_ptr + global_token_idx * stride_k_token + (idx_feats - key_dim) * stride_k_dim
+        k_ptrs = (
+            k_ptr
+            + global_token_idx * stride_k_token
+            + (idx_feats - key_dim) * stride_k_dim
+        )
         tl.store(k_ptrs, acc, mask=mask_feat & is_key)
 
         is_value = (idx_feats >= 2 * key_dim) & (idx_feats < 2 * key_dim + value_dim)
-        v_ptrs = v_ptr + global_token_idx * stride_v_token + (idx_feats - 2 * key_dim) * stride_v_dim
+        v_ptrs = (
+            v_ptr
+            + global_token_idx * stride_v_token
+            + (idx_feats - 2 * key_dim) * stride_v_dim
+        )
         tl.store(v_ptrs, acc, mask=mask_feat & is_value)
 
 
@@ -285,7 +334,7 @@ def causal_conv1d_fn_split_qkv(
     stride_x_token = x.stride(1)
     stride_w_dim = weight.stride(0)
     stride_w_width = weight.stride(1)
-    
+
     num_cache_lines = 0
     stride_istate_seq = 0
     stride_istate_dim = 0
@@ -305,14 +354,34 @@ def causal_conv1d_fn_split_qkv(
         )
 
     _causal_conv1d_fwd_split_kernel[grid](
-        x, weight, bias, conv_states, cache_indices, has_initial_state, query_start_loc,
-        q_out, k_out, v_out,
-        k_dim, v_dim, dim, cu_seqlen, num_cache_lines,
-        stride_x_dim, stride_x_token, stride_w_dim, stride_w_width,
-        stride_istate_seq, stride_istate_dim, stride_istate_token,
-        q_out.stride(0), q_out.stride(1),
-        k_out.stride(0), k_out.stride(1),
-        v_out.stride(0), v_out.stride(1),
+        x,
+        weight,
+        bias,
+        conv_states,
+        cache_indices,
+        has_initial_state,
+        query_start_loc,
+        q_out,
+        k_out,
+        v_out,
+        k_dim,
+        v_dim,
+        dim,
+        cu_seqlen,
+        num_cache_lines,
+        stride_x_dim,
+        stride_x_token,
+        stride_w_dim,
+        stride_w_width,
+        stride_istate_seq,
+        stride_istate_dim,
+        stride_istate_token,
+        q_out.stride(0),
+        q_out.stride(1),
+        k_out.stride(0),
+        k_out.stride(1),
+        v_out.stride(0),
+        v_out.stride(1),
         pad_slot_id,
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
@@ -328,4 +397,3 @@ def causal_conv1d_fn_split_qkv(
     )
 
     return q_out, k_out, v_out
-
