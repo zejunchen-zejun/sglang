@@ -28,6 +28,7 @@ if [[ "${TYPE}" == "launch" ]]; then
     echo "========== LAUNCHING SERVER ========"
     if [[ "${model_name}" == "Qwen3-VL-235B" ]]; then
         export SGLANG_USE_AITER=1
+        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=1
         echo "********** AOT Prebuild aiter kernel start ... **********"
         cd /aiter
         python3 op_tests/test_rope.py
@@ -106,9 +107,8 @@ if [[ "${TYPE}" == "launch" ]]; then
             --disable-radix-cache \
             --max-prefill-tokens 32768 \
             --cuda-graph-max-bs 8 \
-            --page-size 1024  \
+            --page-size 32  \
             --mm-enable-dp-encoder \
-            --kv-cache-dtype fp8_e4m3 \
             --enable-aiter-allreduce-fusion \
             --max-running-requests 128 \
             --watchdog-timeout 1200 &
@@ -116,7 +116,7 @@ if [[ "${TYPE}" == "launch" ]]; then
     elif [[ "${model_name}" == "Qwen3-235B-A22B-Instruct-2507-FP8-Dynamic" ]]; then
         export SGLANG_USE_AITER=1
         export AITER_ROPE_FUSED_QKNORM=1
-        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
+        export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=1
         export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
         export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=1
         python3 -m sglang.launch_server \
