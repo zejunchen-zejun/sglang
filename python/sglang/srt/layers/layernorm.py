@@ -18,6 +18,7 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from packaging.version import Version
 
 from sglang.srt.custom_op import CustomOp
@@ -53,6 +54,7 @@ if _is_cuda or _is_xpu:
         rmsnorm,
     )
 if _use_aiter:
+    from aiter import layer_norm, layernorm2d_fwd_with_add
     from aiter import rmsnorm2d_fwd as rms_norm
     from aiter import rmsnorm2d_fwd_with_add as fused_add_rms_norm
 elif _is_hip:
@@ -246,6 +248,7 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        quant_format: str = "",
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward method with allreduce fusion
@@ -258,18 +261,26 @@ class RMSNorm(CustomOp):
                     aiter_allreduce_residual_rmsnorm,
                 )
 
-                fused_op = torch.ops.sglang.aiter_allreduce_residual_rmsnorm
+                fused_op = (
+                    torch.ops.sglang.aiter_allreduce_residual_rmsnorm
+                    if supports_custom_op()
+                    else aiter_allreduce_residual_rmsnorm
+                )
 
                 if get_tensor_model_parallel_world_size() > 1:
+                    fp8_out = "fp8_e4m3fnuz" in quant_format
                     fused_result = fused_op(
                         allreduce_in=x,
                         residual_in=residual,
                         rms_weight=self.weight,
                         eps=self.variance_epsilon,
-                        fp8_out=False,
+                        fp8_out=fp8_out,
                     )
                     residual_out, norm_out, scale_out = fused_result
                     if norm_out is not None:
+                        # If fp8 quantization is applied, return quantized output with scale
+                        if fp8_out and scale_out is not None:
+                            return (norm_out, scale_out), residual_out
                         return norm_out, residual_out
             else:
                 from sglang.srt.layers.flashinfer_comm_fusion import (
@@ -424,3 +435,55 @@ if not (
         "sgl-kernel layernorm implementation is not available on current platform. Fallback to other kernel libraries."
     )
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm  # noqa: F401
+
+
+class LayerNorm(CustomOp):
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        weight_dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size, dtype=weight_dtype))
+        self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=weight_dtype))
+
+        if _use_aiter:
+            self._forward_method = self.forward_aiter
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            x = x + residual
+            residual = x.to(x.dtype)
+
+        output = F.layer_norm(
+            x, (self.hidden_size,), self.weight, self.bias, self.eps
+        ).to(x.dtype)
+
+        return (output, residual) if residual is not None else output
+
+    def forward_aiter(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            residual_out = torch.empty_like(x)
+            output = torch.empty_like(x)
+            layernorm2d_fwd_with_add(
+                output,
+                x,
+                residual,
+                residual_out,
+                self.weight.data,
+                self.bias.data,
+                self.eps,
+            )
+            return output, residual_out
+        return layer_norm(x, self.weight.data, self.bias.data, self.eps)
