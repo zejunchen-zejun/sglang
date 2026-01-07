@@ -86,6 +86,7 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterReqInput,
     OpenSessionReqInput,
     ParseFunctionCallReq,
+    HostProfileReqInput,
     ProfileReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
@@ -633,7 +634,16 @@ async def clear_hicache_storage_backend():
 
 @app.api_route("/start_profile", methods=["GET", "POST"])
 async def start_profile_async(obj: Optional[ProfileReqInput] = None):
-    """Start profiling."""
+    """
+    Start profiling the scheduler (GPU operations) and optionally the host process.
+
+    By default, this profiles both:
+    - Scheduler: GPU operations (forward pass, attention, etc.)
+    - Host: CPU operations (tokenization, multimodal preprocessing)
+
+    Set include_host=false to only profile the scheduler.
+    Set merge_profiles=true to merge all traces into a single file.
+    """
     if obj is None:
         obj = ProfileReqInput()
 
@@ -646,21 +656,78 @@ async def start_profile_async(obj: Optional[ProfileReqInput] = None):
         record_shapes=obj.record_shapes,
         profile_by_stage=obj.profile_by_stage,
         merge_profiles=obj.merge_profiles,
+        include_host=obj.include_host,
     )
     return Response(
-        content="Start profiling.\n",
+        content="Start profiling (scheduler + host).\n",
         status_code=200,
     )
 
 
 @app.api_route("/stop_profile", methods=["GET", "POST"])
 async def stop_profile_async():
-    """Stop profiling."""
+    """
+    Stop profiling the scheduler and host processes.
+
+    This stops both the scheduler profiler (GPU operations) and the host
+    profiler (CPU operations) if they were started together.
+
+    If merge_profiles was set to true when starting, traces will be merged
+    into a single file for easy visualization.
+    """
     await _global_state.tokenizer_manager.stop_profile()
     return Response(
         content="Stop profiling. This will take some time.\n",
         status_code=200,
     )
+
+
+@app.api_route("/start_host_profile", methods=["GET", "POST"])
+async def start_host_profile_async(obj: Optional[HostProfileReqInput] = None):
+    """
+    Start profiling the host process independently.
+
+    This profiles both CPU and GPU operations in the host process:
+    - CPU: tokenization, request handling
+    - GPU: multimodal preprocessing (image encoding, resizing, etc.)
+
+    This is an alternative to /start_profile when you only want to profile
+    the host process without the scheduler.
+
+    Note: /start_profile with include_host=true (default) will profile
+    both scheduler and host automatically.
+    """
+    if obj is None:
+        obj = HostProfileReqInput()
+
+    result = _global_state.tokenizer_manager.start_host_profile(
+        output_dir=obj.output_dir,
+        activities=obj.activities,
+        with_stack=obj.with_stack,
+        record_shapes=obj.record_shapes,
+        num_requests=obj.num_requests,
+    )
+    return ORJSONResponse(
+        content=result,
+        status_code=200 if result["success"] else HTTPStatus.BAD_REQUEST,
+    )
+
+
+@app.api_route("/stop_host_profile", methods=["GET", "POST"])
+async def stop_host_profile_async():
+    """Stop profiling the host process."""
+    result = _global_state.tokenizer_manager.stop_host_profile()
+    return ORJSONResponse(
+        content=result,
+        status_code=200 if result["success"] else HTTPStatus.BAD_REQUEST,
+    )
+
+
+@app.api_route("/get_host_profile_status", methods=["GET", "POST"])
+async def get_host_profile_status_async():
+    """Get the current host profiling status."""
+    result = _global_state.tokenizer_manager.get_host_profile_status()
+    return ORJSONResponse(content=result, status_code=200)
 
 
 @app.api_route("/freeze_gc", methods=["GET", "POST"])
