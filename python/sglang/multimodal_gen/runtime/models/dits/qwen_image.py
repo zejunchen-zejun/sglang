@@ -30,6 +30,9 @@ from sglang.multimodal_gen.runtime.layers.triton_ops import (
     fuse_scale_shift_gate_select01_kernel,
     fuse_scale_shift_kernel,
 )
+from sglang.multimodal_gen.runtime.layers.triton_ops import (
+    apply_rotary_embedding,
+)
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
@@ -552,39 +555,61 @@ class QwenImageCrossAttention(nn.Module):
         txt_value = txt_value.unflatten(-1, (self.num_heads, -1))
 
         # Apply QK normalization
-        if self.qk_norm:
-            img_query, img_key = apply_qk_norm(
-                q=img_query,
-                k=img_key,
-                q_norm=self.norm_q,
-                k_norm=self.norm_k,
-                head_dim=img_query.shape[-1],
-                allow_inplace=True,
-            )
-            txt_query, txt_key = apply_qk_norm(
-                q=txt_query,
-                k=txt_key,
-                q_norm=self.norm_added_q,
-                k_norm=self.norm_added_k,
-                head_dim=txt_query.shape[-1],
-                allow_inplace=True,
-            )
+        # if self.qk_norm:
+        #     img_query, img_key = apply_qk_norm(
+        #         q=img_query,
+        #         k=img_key,
+        #         q_norm=self.norm_q,
+        #         k_norm=self.norm_k,
+        #         head_dim=img_query.shape[-1],
+        #         allow_inplace=True,
+        #     )
+        #     txt_query, txt_key = apply_qk_norm(
+        #         q=txt_query,
+        #         k=txt_key,
+        #         q_norm=self.norm_added_q,
+        #         k_norm=self.norm_added_k,
+        #         head_dim=txt_query.shape[-1],
+        #         allow_inplace=True,
+        #     )
+        if self.norm_q is not None:
+            img_query = self.norm_q(img_query)
+        if self.norm_k is not None:
+            img_key = self.norm_k(img_key)
+        if self.norm_added_q is not None:
+            txt_query = self.norm_added_q(txt_query)
+        if self.norm_added_k is not None:
+            txt_key = self.norm_added_k(txt_key)
 
         # Apply RoPE
+        # if image_rotary_emb is not None:
+        #     if not (
+        #         isinstance(image_rotary_emb[0], torch.Tensor)
+        #         and image_rotary_emb[0].dim() == 2
+        #     ):
+        #         raise RuntimeError("image_rotary_emb must be cos_sin_cache tensors")
+
+        #     img_cache, txt_cache = image_rotary_emb
+
+        #     img_query, img_key = apply_flashinfer_rope_qk_inplace(
+        #         img_query, img_key, img_cache, is_neox=False
+        #     )
+        #     txt_query, txt_key = apply_flashinfer_rope_qk_inplace(
+        #         txt_query, txt_key, txt_cache, is_neox=False
+        #     )
         if image_rotary_emb is not None:
-            if not (
-                isinstance(image_rotary_emb[0], torch.Tensor)
-                and image_rotary_emb[0].dim() == 2
-            ):
-                raise RuntimeError("image_rotary_emb must be cos_sin_cache tensors")
-
-            img_cache, txt_cache = image_rotary_emb
-
-            img_query, img_key = apply_flashinfer_rope_qk_inplace(
-                img_query, img_key, img_cache, is_neox=False
+            (img_cos, img_sin), (txt_cos, txt_sin) = image_rotary_emb
+            img_query = apply_rotary_embedding(
+                img_query, img_cos, img_sin, interleaved=True
             )
-            txt_query, txt_key = apply_flashinfer_rope_qk_inplace(
-                txt_query, txt_key, txt_cache, is_neox=False
+            img_key = apply_rotary_embedding(
+                img_key, img_cos, img_sin, interleaved=True
+            )
+            txt_query = apply_rotary_embedding(
+                txt_query, txt_cos, txt_sin, interleaved=True
+            )
+            txt_key = apply_rotary_embedding(
+                txt_key, txt_cos, txt_sin, interleaved=True
             )
 
         # Concatenate for joint attention
