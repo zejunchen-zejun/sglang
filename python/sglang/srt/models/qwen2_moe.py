@@ -35,11 +35,6 @@ from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_r
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
 from sglang.srt.layers.activation import SiluAndMul
-from sglang.srt.utils import is_hip
-
-_is_hip = is_hip()
-if _is_hip:
-    from sglang.srt.layers.elementwise import fused_sigmoid_mul_broadcast
 from sglang.srt.layers.communicator import (
     LayerCommunicator,
     LayerScatterModes,
@@ -82,6 +77,8 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+if _is_hip:
+    from sglang.srt.layers.elementwise import fused_sigmoid_mul_broadcast
 
 
 class Qwen2MoeMLP(nn.Module):
