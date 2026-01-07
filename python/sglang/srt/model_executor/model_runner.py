@@ -1471,6 +1471,8 @@ class ModelRunner:
             ):
                 if _use_aiter:
                     self.kv_cache_dtype = dtypes.fp8
+                elif _is_hip:  # fallback for HIP without aiter
+                    self.kv_cache_dtype = torch.float8_e4m3fnuz
                 else:
                     self.kv_cache_dtype = torch.float8_e4m3fn
             else:
@@ -1483,6 +1485,8 @@ class ModelRunner:
         elif self.server_args.kv_cache_dtype == "fp8_e4m3":
             if _use_aiter:
                 self.kv_cache_dtype = dtypes.fp8
+            elif _is_hip:  # fallback for HIP without aiter
+                self.kv_cache_dtype = torch.float8_e4m3fnuz
             else:
                 self.kv_cache_dtype = torch.float8_e4m3fn
         elif self.server_args.kv_cache_dtype in ("bf16", "bfloat16"):
