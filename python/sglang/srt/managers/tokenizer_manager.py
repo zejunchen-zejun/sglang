@@ -136,6 +136,22 @@ class ReqState:
     last_time: float = 0.0
     last_completion_tokens: int = 1
 
+    # For TTFT breakdown timing
+    text_tokenization_time: float = 0.0
+    mm_preprocessing_time: float = 0.0
+    prefill_preparation_time: float = 0.0
+    vit_encoding_time: float = 0.0
+    llm_prefill_time: float = 0.0
+    total_prefill_time: float = 0.0
+
+    # For scheduler overhead timing
+    scheduler_receive_time: float = 0.0
+    model_call_time: float = 0.0
+    first_token_generated_time: float = 0.0
+    output_send_time: float = 0.0
+    detokenizer_receive_time: float = 0.0
+    detokenizer_send_time: float = 0.0
+
     # For streaming output
     last_output_offset: int = 0
 
@@ -429,6 +445,9 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         request: Optional[fastapi.Request] = None,
     ):
         created_time = time.time()
+        logger.info(
+            f"[TTFT_MEASUREMENT] Request {obj.rid} received at time: {created_time:.6f}"
+        )
         self.auto_create_handle_loop()
         obj.normalize_batch_and_arguments()
 
@@ -455,6 +474,11 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             if obj.is_single:
                 tokenized_obj = await self._tokenize_one_request(obj)
                 state = self._send_one_request(obj, tokenized_obj, created_time)
+                # Copy timing info from obj to state
+                state.text_tokenization_time = getattr(
+                    obj, "text_tokenization_time", 0.0
+                )
+                state.mm_preprocessing_time = getattr(obj, "mm_preprocessing_time", 0.0)
                 async for response in self._wait_one_response(obj, state, request):
                     yield response
             else:
@@ -562,10 +586,17 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         if not texts or self.tokenizer is None:
             raise ValueError("texts cannot be empty and tokenizer must be initialized")
 
+        overall_start = time.time()
+
         # Step 1: Detect input format and prepare for tokenization
+        step1_start = time.time()
         input_format = self._detect_input_format(texts, is_cross_encoder)
         tokenizer_input = self._prepare_tokenizer_input(texts, input_format)
         original_batch_size = len(texts) if not isinstance(texts, str) else 1
+        step1_duration = (time.time() - step1_start) * 1000
+        logger.info(
+            f"[TEXT_TOK_DETAIL] Step 1 - Input format detection: {step1_duration:.2f} ms"
+        )
 
         # Step 2: Set up tokenizer arguments
         tokenizer_kwargs = (
@@ -578,6 +609,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             and input_format == "single_string"
         )
 
+        step3_start = time.time()
         if use_async_tokenizer:
             logger.debug("Using async dynamic batch tokenizer for single text")
             result = await self.async_dynamic_batch_tokenizer.encode(
@@ -592,20 +624,40 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             )
         else:
             logger.debug(f"Using regular tokenizer for {len(tokenizer_input)} inputs")
+            logger.info(f"[TEXT_TOK_DETAIL] tokenizer_input: {tokenizer_input}")
             encoded = self.tokenizer(tokenizer_input, **tokenizer_kwargs)
+            logger.info(f"[TEXT_TOK_DETAIL] encoded: {encoded}")
             input_ids = encoded["input_ids"]
             token_type_ids = encoded.get("token_type_ids") if is_cross_encoder else None
+        step3_duration = (time.time() - step3_start) * 1000
+        logger.info(
+            f"[TEXT_TOK_DETAIL] Step 3 - Tokenization execution: {step3_duration:.2f} ms"
+        )
 
         # Step 4: Extract results based on input format
-        return self._extract_tokenizer_results(
+        step4_start = time.time()
+        result = self._extract_tokenizer_results(
             input_ids, token_type_ids, input_format, original_batch_size
         )
+        step4_duration = (time.time() - step4_start) * 1000
+        logger.info(
+            f"[TEXT_TOK_DETAIL] Step 4 - Result extraction: {step4_duration:.2f} ms"
+        )
+
+        overall_duration = (time.time() - overall_start) * 1000
+        total_steps = step1_duration + step3_duration + step4_duration
+        logger.info(
+            f"[TEXT_TOK_DETAIL] === _tokenize_texts TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ==="
+        )
+
+        return result
 
     async def _tokenize_one_request(
         self,
         obj: Union[GenerateReqInput, EmbeddingReqInput],
     ):
         """Tokenize one request."""
+        tokenize_start_time = time.time()
         # Tokenize
         input_embeds = None
         input_text = obj.text
@@ -632,22 +684,42 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                     "the engine with skip_tokenizer_init=False."
                 )
 
+            # Skip first text tokenization for multimodal requests
+            # The multimodal processor will do the tokenization with proper placeholders
             skip_first_tokenize = self.mm_processor and obj.contains_mm_input()
+
             if skip_first_tokenize:
                 # For multimodal requests, skip the first tokenization
                 # The input_ids will be generated by mm_data_processor later
                 input_ids = None
+                text_tokenization_duration = 0.0
+                logger.info(
+                    f"[TTFT_BREAKDOWN] Req {obj.rid}: Text tokenization time: 0.00 ms (skipped for multimodal)"
+                )
+                obj.text_tokenization_time = text_tokenization_duration
             else:
                 # For text-only requests, perform tokenization
                 input_ids, token_type_ids = await self._tokenize_texts(
                     input_text, is_cross_encoder_request
                 )
+                tokenize_text_time = time.time()
+                text_tokenization_duration = tokenize_text_time - tokenize_start_time
+                logger.info(
+                    f"[TTFT_BREAKDOWN] Req {obj.rid}: Text tokenization time: {text_tokenization_duration * 1000:.2f} ms"
+                )
+                # Store in obj for later aggregation
+                obj.text_tokenization_time = text_tokenization_duration
 
         if self.mm_processor and obj.contains_mm_input():
+            mm_process_start_time = time.time()
             if obj.image_data is not None and not isinstance(obj.image_data, list):
                 obj.image_data = [obj.image_data]
             if obj.audio_data is not None and not isinstance(obj.audio_data, list):
                 obj.audio_data = [obj.audio_data]
+
+            # logger.info(f"[TEXT_TOK_DETAIL] input_text: {input_text}")
+            # logger.info(f"[TEXT_TOK_DETAIL] input_ids: {input_ids}")
+            # logger.info(f"[TEXT_TOK_DETAIL] input_text or input_ids: {input_text or input_ids}")
             mm_inputs: Dict = await self.mm_data_processor.process(
                 image_data=obj.image_data,
                 audio_data=obj.audio_data,
@@ -655,8 +727,21 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 request_obj=obj,
                 max_req_input_len=self.max_req_input_len,
             )
+            mm_process_end_time = time.time()
+            mm_preprocessing_duration = mm_process_end_time - mm_process_start_time
+            logger.info(
+                f"[TTFT_BREAKDOWN] Req {obj.rid}: Multimodal preprocessing time: {mm_preprocessing_duration * 1000:.2f} ms"
+            )
+            # Store in obj for later aggregation
+            obj.mm_preprocessing_time = mm_preprocessing_duration
             if mm_inputs and "input_ids" in mm_inputs:
                 input_ids = mm_inputs["input_ids"]
+            # elif input_ids is None:
+            #     # Fallback: if multimodal processing didn't return input_ids, do tokenization now
+            #     logger.warning(f"[TTFT_BREAKDOWN] Req {obj.rid}: Multimodal processing didn't return input_ids, performing fallback tokenization")
+            #     input_ids, token_type_ids = await self._tokenize_texts(
+            #         input_text, is_cross_encoder_request
+            #     )
         else:
             mm_inputs = None
 
@@ -1406,6 +1491,61 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 )
                 continue
 
+            # Store model forward timing from scheduler if available
+            if hasattr(recv_obj, "total_prefill_time") and recv_obj.total_prefill_time:
+                if i < len(recv_obj.total_prefill_time):
+                    state.total_prefill_time = recv_obj.total_prefill_time[i]
+            if (
+                hasattr(recv_obj, "prefill_preparation_time")
+                and recv_obj.prefill_preparation_time
+            ):
+                if i < len(recv_obj.prefill_preparation_time):
+                    state.prefill_preparation_time = recv_obj.prefill_preparation_time[
+                        i
+                    ]
+            if hasattr(recv_obj, "vit_encoding_time") and recv_obj.vit_encoding_time:
+                if i < len(recv_obj.vit_encoding_time):
+                    state.vit_encoding_time = recv_obj.vit_encoding_time[i]
+            if hasattr(recv_obj, "llm_prefill_time") and recv_obj.llm_prefill_time:
+                if i < len(recv_obj.llm_prefill_time):
+                    state.llm_prefill_time = recv_obj.llm_prefill_time[i]
+
+            # Store scheduler overhead timing if available
+            if (
+                hasattr(recv_obj, "scheduler_receive_time")
+                and recv_obj.scheduler_receive_time
+            ):
+                if i < len(recv_obj.scheduler_receive_time):
+                    state.scheduler_receive_time = recv_obj.scheduler_receive_time[i]
+            if hasattr(recv_obj, "model_call_time") and recv_obj.model_call_time:
+                if i < len(recv_obj.model_call_time):
+                    state.model_call_time = recv_obj.model_call_time[i]
+            if (
+                hasattr(recv_obj, "first_token_generated_time")
+                and recv_obj.first_token_generated_time
+            ):
+                if i < len(recv_obj.first_token_generated_time):
+                    state.first_token_generated_time = (
+                        recv_obj.first_token_generated_time[i]
+                    )
+            if hasattr(recv_obj, "output_send_time") and recv_obj.output_send_time:
+                if i < len(recv_obj.output_send_time):
+                    state.output_send_time = recv_obj.output_send_time[i]
+            if (
+                hasattr(recv_obj, "detokenizer_receive_time")
+                and recv_obj.detokenizer_receive_time
+            ):
+                if i < len(recv_obj.detokenizer_receive_time):
+                    state.detokenizer_receive_time = recv_obj.detokenizer_receive_time[
+                        i
+                    ]
+            if (
+                hasattr(recv_obj, "detokenizer_send_time")
+                and recv_obj.detokenizer_send_time
+            ):
+                if i < len(recv_obj.detokenizer_send_time):
+                    state.detokenizer_send_time = recv_obj.detokenizer_send_time[i]
+
             # Build meta_info and return value
             meta_info = {
                 "id": rid,
@@ -1433,6 +1573,140 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                         "cached_tokens": recv_obj.cached_tokens[i],
                     }
                 )
+
+                # Track TTFT (Time To First Token)
+                if state.first_token_time == 0.0 and recv_obj.completion_tokens[i] > 0:
+                    state.first_token_time = time.time()
+                    ttft_seconds = state.first_token_time - state.created_time
+                    logger.info(
+                        f"[TTFT_MEASUREMENT] Req {rid}: First token generated at time: {state.first_token_time:.6f}"
+                    )
+                    logger.info(
+                        f"[TTFT_MEASUREMENT] Req {rid}: TTFT: {ttft_seconds:.6f} seconds ({ttft_seconds * 1000:.2f} ms)"
+                    )
+
+                    # Calculate scheduler overhead and return path timing
+                    scheduler_queue_time = 0.0
+                    scheduler_to_model_time = 0.0
+                    output_processing_time = 0.0
+                    scheduler_to_detok_ipc = 0.0
+                    detokenizer_processing_time = 0.0
+                    detok_to_tokmgr_ipc = 0.0
+
+                    if state.scheduler_receive_time > 0:
+                        # Time from tokenizer_manager to scheduler
+                        scheduler_queue_time = state.scheduler_receive_time - (
+                            state.created_time
+                            + state.text_tokenization_time
+                            + state.mm_preprocessing_time
+                        )
+                    if state.model_call_time > 0 and state.scheduler_receive_time > 0:
+                        # Time from scheduler receiving to calling model
+                        scheduler_to_model_time = (
+                            state.model_call_time - state.scheduler_receive_time
+                        )
+                    if (
+                        state.first_token_generated_time > 0
+                        and state.output_send_time > 0
+                    ):
+                        # Time from model generation complete to scheduler sending output
+                        output_processing_time = (
+                            state.output_send_time - state.first_token_generated_time
+                        )
+                    if (
+                        state.detokenizer_receive_time > 0
+                        and state.output_send_time > 0
+                    ):
+                        # IPC time from scheduler to detokenizer
+                        scheduler_to_detok_ipc = (
+                            state.detokenizer_receive_time - state.output_send_time
+                        )
+                    if (
+                        state.detokenizer_send_time > 0
+                        and state.detokenizer_receive_time > 0
+                    ):
+                        # Detokenizer processing time
+                        detokenizer_processing_time = (
+                            state.detokenizer_send_time - state.detokenizer_receive_time
+                        )
+                    if state.detokenizer_send_time > 0:
+                        # IPC time from detokenizer to tokenizer_manager
+                        detok_to_tokmgr_ipc = (
+                            state.first_token_time - state.detokenizer_send_time
+                        )
+
+                    # Print detailed breakdown summary
+                    logger.info(
+                        f"[TTFT_SUMMARY] ====== Req {rid} TTFT Breakdown ======"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  1. Text tokenization:            {state.text_tokenization_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  2. Multimodal preprocessing:     {state.mm_preprocessing_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  3. Scheduler queue time:         {scheduler_queue_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  4. Scheduler preparation:        {scheduler_to_model_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  5. Prefill preparation:          {state.prefill_preparation_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  6. ViT encoding + embedding:     {state.vit_encoding_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  7. LLM prefill forward:          {state.llm_prefill_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  8. Output processing:            {output_processing_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}:  9. Scheduler->Detok IPC:         {scheduler_to_detok_ipc * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: 10. Detokenizer processing:       {detokenizer_processing_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: 11. Detok->TokMgr IPC:            {detok_to_tokmgr_ipc * 1000:8.2f} ms"
+                    )
+
+                    # Calculate breakdown sum
+                    breakdown_sum = (
+                        state.text_tokenization_time
+                        + state.mm_preprocessing_time
+                        + scheduler_queue_time
+                        + scheduler_to_model_time
+                        + state.prefill_preparation_time
+                        + state.vit_encoding_time
+                        + state.llm_prefill_time
+                        + output_processing_time
+                        + scheduler_to_detok_ipc
+                        + detokenizer_processing_time
+                        + detok_to_tokmgr_ipc
+                    )
+
+                    # Also show total model forward time for comparison
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: -----------------------------------------------"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: Breakdown sum (1-11):                {breakdown_sum * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: Total model forward (5+6+7):          {state.total_prefill_time * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: Actual TTFT:                          {ttft_seconds * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: Difference:                            {(ttft_seconds - breakdown_sum) * 1000:8.2f} ms"
+                    )
+                    logger.info(
+                        f"[TTFT_SUMMARY] Req {rid}: ======================================================="
+                    )
 
             if getattr(recv_obj, "output_hidden_states", None):
                 meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
@@ -1681,9 +1955,14 @@ class TokenizerManager(TokenizerCommunicatorMixin):
         ):
             state.first_token_time = state.last_time = time.time()
             state.last_completion_tokens = completion_tokens
-            self.metrics_collector.observe_time_to_first_token(
-                labels, state.first_token_time - state.created_time
+            ttft_seconds = state.first_token_time - state.created_time
+            logger.info(
+                f"[TTFT_MEASUREMENT] First token generated at time: {state.first_token_time:.6f}"
             )
+            logger.info(
+                f"[TTFT_MEASUREMENT] TTFT: {ttft_seconds:.6f} seconds ({ttft_seconds * 1000:.2f} ms)"
+            )
+            self.metrics_collector.observe_time_to_first_token(labels, ttft_seconds)
         else:
             num_new_tokens = completion_tokens - state.last_completion_tokens
             if num_new_tokens:

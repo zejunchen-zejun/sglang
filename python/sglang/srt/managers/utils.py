@@ -44,6 +44,12 @@ class GenerationBatchResult:
     # relay path: forward stream -> next step forward
     next_draft_input: Optional[EagleDraftInput] = None
 
+    # TTFT breakdown timing (in seconds) - measured in model_runner
+    prefill_preparation_time: float = 0.0
+    vit_encoding_time: float = 0.0
+    llm_prefill_time: float = 0.0
+    total_model_forward_time: float = 0.0
+
     def copy_to_cpu(self, return_logprob: bool = False):
         """Copy tensors to CPU in overlap scheduling.
         Only the tensors which are needed for processing results are copied,

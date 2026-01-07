@@ -150,6 +150,10 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
         return recv_obj
 
     def handle_batch_token_id_out(self, recv_obj: BatchTokenIDOutput):
+        import time
+
+        detokenizer_receive_time = time.time()
+
         bs = len(recv_obj.rids)
 
         # Initialize decode status
@@ -246,6 +250,19 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             s.sent_offset = len(output_str)
             output_strs.append(incremental_output)
 
+        # Record detokenizer send time and create timing lists
+        detokenizer_send_time = time.time()
+        detokenizer_receive_times = (
+            [detokenizer_receive_time] * bs
+            if hasattr(recv_obj, "output_send_time") and recv_obj.output_send_time
+            else None
+        )
+        detokenizer_send_times = (
+            [detokenizer_send_time] * bs
+            if hasattr(recv_obj, "output_send_time") and recv_obj.output_send_time
+            else None
+        )
+
         return BatchStrOutput(
             rids=recv_obj.rids,
             http_worker_ipcs=recv_obj.http_worker_ipcs,
@@ -274,6 +291,16 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             placeholder_tokens_idx=None,
             placeholder_tokens_val=None,
             token_steps=recv_obj.token_steps,
+            prefill_preparation_time=recv_obj.prefill_preparation_time,
+            vit_encoding_time=recv_obj.vit_encoding_time,
+            llm_prefill_time=recv_obj.llm_prefill_time,
+            total_prefill_time=recv_obj.total_prefill_time,
+            scheduler_receive_time=recv_obj.scheduler_receive_time,
+            model_call_time=recv_obj.model_call_time,
+            first_token_generated_time=recv_obj.first_token_generated_time,
+            output_send_time=recv_obj.output_send_time,
+            detokenizer_receive_time=detokenizer_receive_times,
+            detokenizer_send_time=detokenizer_send_times,
         )
 
     def handle_multimodal_decode_req(self, recv_obj: BatchMultimodalDecodeReq):

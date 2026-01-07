@@ -1070,6 +1070,15 @@ class Scheduler(
 
             if batch:
                 result = self.run_batch(batch)
+                # Record model completion time for TTFT tracking (right after run_batch returns)
+                # Only for prefill/extend batches
+                if batch.forward_mode.is_extend():
+                    import time
+
+                    model_complete_time = time.time()
+                    for req in batch.reqs:
+                        if req.first_token_generated_time == 0.0:
+                            req.first_token_generated_time = model_complete_time
                 self.process_batch_result(batch, result)
             else:
                 # When the server is idle, do self-check and re-init some states
@@ -1091,12 +1100,44 @@ class Scheduler(
 
             batch_result = None
             if batch:
+                import time
+
+                start = time.time()
                 batch_result = self.run_batch(batch)
+                end = time.time()
+                logger.info(
+                    f"[TTFT_BREAKDOWN] run_batch time: {(end - start) * 1000:.2f} ms"
+                )
+                # Record model completion time for TTFT tracking (right after run_batch returns)
+                # Only for prefill/extend batches
+                if batch.forward_mode.is_extend():
+                    import time
+
+                    model_complete_time = time.time()
+                    for req in batch.reqs:
+                        if req.first_token_generated_time == 0.0:
+                            req.first_token_generated_time = model_complete_time
                 self.result_queue.append((batch.copy(), batch_result))
 
             if self.last_batch:
                 # Process the results of the last batch
+                import time
+
+                before_popleft = time.time()
                 tmp_batch, tmp_result = self.result_queue.popleft()
+
+                # Log the delay from when this batch was completed to when we start processing it
+                if tmp_batch.forward_mode.is_extend() and tmp_batch.reqs:
+                    for req in tmp_batch.reqs:
+                        if req.first_token_generated_time > 0:
+                            delay_time = (
+                                before_popleft - req.first_token_generated_time
+                            ) * 1000
+                            logger.info(
+                                f"[OUTPUT_PROC_GAP] Req {req.rid}: Delay from token generation to start processing: {delay_time:.2f} ms"
+                            )
+                            break
+
                 self.process_batch_result(tmp_batch, tmp_result)
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
@@ -1465,6 +1506,8 @@ class Scheduler(
             self._prefetch_kvcache(req)
             self.waiting_queue.append(req)
             req.time_stats.wait_queue_entry_time = time.perf_counter()
+            # Record scheduler receive time for TTFT breakdown
+            req.scheduler_receive_time = time.time()
             trace_slice_end("process req", req.rid, auto_next_anon=True)
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._prefetch_kvcache(req)
@@ -1975,6 +2018,12 @@ class Scheduler(
         """Run a batch."""
         self.forward_ct += 1
 
+        # Record model call time for TTFT breakdown
+        model_call_start = time.time()
+        for req in batch.reqs:
+            if req.model_call_time == 0.0:  # Only set once for first forward
+                req.model_call_time = model_call_start
+
         # Whether to run the profiler
         self._profile_batch_predicate(batch)
         if self.forward_sleep_time is not None:
@@ -2072,6 +2121,18 @@ class Scheduler(
             batch_result.extend_logprob_start_len_per_req = (
                 extend_logprob_start_len_per_req
             )
+
+            # Fill in model forward timing from batch_result (measured in model_runner)
+            # Only for extend/prefill batches
+            if batch.forward_mode.is_extend() and hasattr(
+                batch_result, "total_model_forward_time"
+            ):
+                for req in batch.reqs:
+                    req.prefill_preparation_time = batch_result.prefill_preparation_time
+                    req.vit_encoding_time = batch_result.vit_encoding_time
+                    req.llm_prefill_time = batch_result.llm_prefill_time
+                    req.total_prefill_time = batch_result.total_model_forward_time
+
             return batch_result
         else:  # embedding or reward model
             model_worker_batch = batch.get_model_worker_batch()
@@ -2099,20 +2160,47 @@ class Scheduler(
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        import time
+
+        process_batch_result_start = time.time()
+
         if batch.forward_mode.is_decode():
             self.process_batch_result_decode(batch, result)
             if self.enable_trace:
                 trace_slice_batch("decode loop", batch.reqs)
 
         elif batch.forward_mode.is_extend():
+            prefill_start = time.time()
             self.process_batch_result_prefill(batch, result)
+            prefill_duration = (time.time() - prefill_start) * 1000
             if self.enable_trace:
                 trace_slice_batch("prefill", batch.reqs)
+
+            # Log the time from first_token_generated to now for TTFT requests
+            for req in batch.reqs:
+                if req.first_token_generated_time > 0:
+                    time_since_generation = (
+                        time.time() - req.first_token_generated_time
+                    ) * 1000
+                    logger.info(
+                        f"[OUTPUT_PROC_GAP] Req {req.rid}: From token generation to end of process_batch_result: {time_since_generation:.2f} ms"
+                    )
+                    logger.info(
+                        f"[OUTPUT_PROC_GAP] Req {req.rid}: process_batch_result_prefill took: {prefill_duration:.2f} ms"
+                    )
+                    break  # Only log once per batch
 
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:
                 if result.copy_done is not None:
                     result.copy_done.synchronize()
+        process_batch_result_duration = (
+            time.time() - process_batch_result_start
+        ) * 1000
+        if batch.forward_mode.is_extend():
+            logger.info(
+                f"[OUTPUT_PROC_GAP] process_batch_result total: {process_batch_result_duration:.2f} ms"
+            )
 
         self.maybe_send_health_check_signal()
 
@@ -2822,8 +2910,6 @@ def run_scheduler_process(
     # Configure the logger (must be called before logging)
     configure_logger(server_args, prefix=prefix)
     suppress_other_loggers()
-    
-
 
     # Set cpu affinity to this gpu process
     if get_bool_env_var("SGLANG_SET_CPU_AFFINITY"):

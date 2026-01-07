@@ -241,10 +241,19 @@ class BaseMultimodalProcessor(ABC):
         """
         process multimodal data with transformers AutoProcessor
         """
+        import time
+
+        logger.info(f"[DEBUG_TRACE] Entering process_mm_data")
+
+        # Step 5.1.1: Prepare kwargs
+        logger.info(f"[DEBUG_TRACE] Preparing kwargs for processor")
+        substep1_start = time.time()
         if images:
             kwargs["images"] = images
+            logger.info(f"[DEBUG_TRACE] Added {len(images)} images to kwargs")
         if videos:
             kwargs["videos"] = videos
+            logger.info(f"[DEBUG_TRACE] Added {len(videos)} videos to kwargs")
         if audios:
             if self._processor.__class__.__name__ in {
                 "Gemma3nProcessor",
@@ -272,12 +281,38 @@ class BaseMultimodalProcessor(ABC):
             }:
                 # Note: for qwen-vl, processor has some reshape issue because of dims restriction on Ascend.
                 kwargs["device"] = "npu"
-        result = processor.__call__(
-            text=[input_text],
-            padding=True,
-            return_tensors="pt",
-            **kwargs,
+        substep1_duration = (time.time() - substep1_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL]     Step 5.1.1 - Prepare kwargs: {substep1_duration:.2f} ms"
         )
+
+        # Step 5.1.2: Call processor.__call__()
+        logger.info(f"[DEBUG_TRACE] About to call processor.__call__()")
+        substep2_start = time.time()
+        try:
+            result = processor.__call__(
+                text=[input_text],
+                padding=True,
+                return_tensors="pt",
+                **kwargs,
+            )
+            logger.info(
+                f"[DEBUG_TRACE] processor.__call__() completed, result keys: {list(result.keys())}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] Exception in processor.__call__(): {e}", exc_info=True
+            )
+            raise
+        # end = time.time()
+        # logger.info(f"processor call time taken: {end - start}")
+        substep2_duration = (time.time() - substep2_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL]     Step 5.1.2 - processor.__call__() execution: {substep2_duration:.2f} ms"
+        )
+
+        # Step 5.1.3: Move feature tensors to CPU (if needed)
+        substep3_start = time.time()
         if not self.server_args.keep_mm_feature_on_device:
             # move feature tensors to cpu
             for feature_name in self.FEATURE_NAMES:
@@ -288,6 +323,10 @@ class BaseMultimodalProcessor(ABC):
                         result[feature_name], torch.Tensor
                     ):
                         result[feature_name] = result[feature_name].to("cpu")
+        substep3_duration = (time.time() - substep3_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL]     Step 5.1.3 - Move tensors to CPU: {substep3_duration:.2f} ms"
+        )
 
         return result
 
@@ -345,6 +384,7 @@ class BaseMultimodalProcessor(ABC):
         try:
             if modality == Modality.IMAGE:
                 img_tensor, _ = load_image_tensor(data, discard_alpha_channel)
+                img_tensor = img_tensor.to("cuda")
                 return img_tensor
             elif modality == Modality.VIDEO:
                 return load_video(data, frame_count_limit)
@@ -368,19 +408,33 @@ class BaseMultimodalProcessor(ABC):
         """
         load multimodal data parallelly using iterators.
         """
+        logger.info(
+            f"[DEBUG_TRACE]   → submit_data_loading_tasks 开始: text_parts={len(text_parts)}, data_iterators={list(data_iterators.keys())}"
+        )
+        logger.info(f"[DEBUG_TRACE]   , text_parts: {text_parts}")
         futures = []
         task_info = []
 
-        for text_part in text_parts:
+        for idx, text_part in enumerate(text_parts):
+            logger.info(f"[DEBUG_TRACE]   处理 text_part[{idx}]: {text_part}")
             modality = multimodal_tokens.get_modality_of_token(text_part)
             if modality is not None:
+                logger.info(
+                    f"[DEBUG_TRACE]     处理 text_part[{idx}]: modality={modality}"
+                )
                 data_iterator = data_iterators.get(modality)
                 if data_iterator is None:
+                    logger.error(
+                        f"[DEBUG_TRACE] ✗ 没有找到 {modality} 的 data_iterator"
+                    )
                     raise ValueError(f"No data iterator found for token: {text_part}")
 
                 try:
                     data = next(data_iterator)
                 except StopIteration:
+                    logger.error(
+                        f"[DEBUG_TRACE] ✗ data_iterator 耗尽: modality={modality}, text_part={text_part}"
+                    )
                     raise ValueError(
                         f"Mismatch: More '{text_part}' tokens found than corresponding data items provided."
                     )
@@ -396,6 +450,9 @@ class BaseMultimodalProcessor(ABC):
                         # Ensure we don't exceed the absolute max (redundant if scaling_factor handles it)
                         # frame_count_limit = min(frame_count_limit, max_image_frames)
                     except StopIteration:
+                        logger.error(
+                            f"[DEBUG_TRACE] ✗ image_estimated_frames_iter 耗尽"
+                        )
                         raise ValueError(
                             "Mismatch between image tokens and estimated frame counts."
                         )
@@ -411,7 +468,12 @@ class BaseMultimodalProcessor(ABC):
                     )
                 )
                 task_info.append((modality, data, frame_count_limit))
+                if idx < 5:
+                    logger.info(
+                        f"[DEBUG_TRACE]     ✓ 已提交 future[{len(futures)-1}] for {modality}"
+                    )
 
+        logger.info(f"[DEBUG_TRACE]   → 检查剩余数据项")
         for modality, iterator in data_iterators.items():
             try:
                 next(iterator)
@@ -423,6 +485,9 @@ class BaseMultimodalProcessor(ABC):
             except Exception:
                 pass
 
+        logger.info(
+            f"[DEBUG_TRACE]   ✓ submit_data_loading_tasks 完成: 返回 {len(futures)} futures, {len(task_info)} task_info"
+        )
         return futures, task_info
 
     def load_mm_data(
@@ -445,6 +510,12 @@ class BaseMultimodalProcessor(ABC):
             discard_alpha_channel: if True, discards the alpha channel in the returned images
 
         """
+        import time
+
+        overall_start = time.time()
+
+        # Step 1: Parse prompt and prepare iterators
+        step1_start = time.time()
         multimodal_tokens_pattern = multimodal_tokens.get_combined_regex()
 
         if isinstance(prompt, list) and return_text:
@@ -465,23 +536,57 @@ class BaseMultimodalProcessor(ABC):
             data_iterators[Modality.VIDEO] = iter(video_data)
         if multimodal_tokens.audio_token and audio_data:
             data_iterators[Modality.AUDIO] = iter(audio_data)
+        step1_duration = (time.time() - step1_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL] Step 1 - Prompt parsing: {step1_duration:.2f} ms"
+        )
+        logger.info(
+            f"[DEBUG_TRACE] ✓ Step 1 完成: text_parts={len(text_parts)}, data_iterators={list(data_iterators.keys())}"
+        )
 
-        # futures: the futures of loaded data
-        # task_info: modality, raw_data, and other metadata of each data
-        futures, task_info = self.submit_data_loading_tasks(
-            text_parts=text_parts,
-            multimodal_tokens=multimodal_tokens,
-            data_iterators=data_iterators,
-            discard_alpha_channel=discard_alpha_channel,
-            audio_sample_rate=audio_sample_rate,
+        # Step 2: Submit data loading tasks (parallel I/O)
+        logger.info(f"[DEBUG_TRACE] → 即将开始 Step 2 - submit_data_loading_tasks")
+        step2_start = time.time()
+        try:
+            futures, task_info = self.submit_data_loading_tasks(
+                text_parts=text_parts,
+                multimodal_tokens=multimodal_tokens,
+                data_iterators=data_iterators,
+                discard_alpha_channel=discard_alpha_channel,
+                audio_sample_rate=audio_sample_rate,
+            )
+            logger.info(
+                f"[DEBUG_TRACE] ✓ submit_data_loading_tasks 完成: futures={len(futures)}, task_info={len(task_info)}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] ✗ submit_data_loading_tasks 异常: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            raise
+        step2_duration = (time.time() - step2_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL] Step 2 - Submit I/O tasks ({len(futures)} files): {step2_duration:.2f} ms"
+        )
+
+        logger.info(
+            f"[DEBUG_TRACE] → 创建迭代器: task_info={len(task_info)}, futures={len(futures)}"
         )
         task_info_iter = iter(task_info)
         futures_iter = iter(futures)
+        logger.info(f"[DEBUG_TRACE] ✓ 迭代器创建完成")
 
-        # Process results
+        # Step 3: Collect I/O results
+        logger.info(f"[DEBUG_TRACE] → 即将开始 Step 3 - 收集 I/O 结果")
+        step3_start = time.time()
         images, videos, audios = [], [], []
         new_text_parts = []
-        for text_part in text_parts:
+        logger.info(f"[DEBUG_TRACE] → 开始遍历 {len(text_parts)} 个 text_parts")
+        for idx, text_part in enumerate(text_parts):
+            if idx % 10 == 0:  # Print every 10 iterations to avoid log spam
+                logger.info(
+                    f"[DEBUG_TRACE]   处理中 text_part [{idx}/{len(text_parts)}]"
+                )
             try:
                 if multimodal_tokens_pattern.match(text_part):
                     modality, raw_data, frame_limit = next(task_info_iter)
@@ -527,15 +632,38 @@ class BaseMultimodalProcessor(ABC):
                     new_text_parts += [text_part]
 
             except Exception as e:
+                logger.error(
+                    f"[DEBUG_TRACE] ✗ text_part[{idx}] 处理异常: {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
                 raise RuntimeError(
                     f"An exception occurred while loading multimodal data: {e}"
                 )
-        return BaseMultiModalProcessorOutput(
+
+        logger.info(
+            f"[DEBUG_TRACE] ✓ 遍历完成: images={len(images)}, videos={len(videos)}, audios={len(audios)}"
+        )
+        step3_duration = (time.time() - step3_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL] Step 3 - Collect I/O results: {step3_duration:.2f} ms"
+        )
+
+        logger.info(f"[DEBUG_TRACE] → 计算总耗时")
+        overall_duration = (time.time() - overall_start) * 1000
+        total_steps = step1_duration + step2_duration + step3_duration
+        logger.info(
+            f"[MM_PREPROC_DETAIL] === load_mm_data TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ==="
+        )
+
+        logger.info(f"[DEBUG_TRACE] → 创建 BaseMultiModalProcessorOutput 对象")
+        result = BaseMultiModalProcessorOutput(
             images=images,
             audios=audios,
             videos=videos,
             input_text="".join(new_text_parts),
         )
+        logger.info(f"[DEBUG_TRACE] load_mm_data returning successfully")
+        return result
 
     @staticmethod
     def get_mm_items_offset(
@@ -605,13 +733,71 @@ class BaseMultimodalProcessor(ABC):
         Returns:
             Tuple of (created mm_items, input_ids)
         """
-        ret = self.process_mm_data(
-            input_text=input_text, images=images, audios=audios, videos=videos, **kwargs
+        import time
+
+        logger.info(
+            f"[DEBUG_TRACE] Entering _process_and_collect_mm_items with {len(images) if images else 0} images, {len(audios) if audios else 0} audios, {len(videos) if videos else 0} videos"
         )
 
-        input_ids = ret["input_ids"].flatten()
-        collected_items = self.collect_mm_items_from_processor_output(ret)
+        # Step 5.1: Call HF processor
+        logger.info(f"[DEBUG_TRACE] About to call process_mm_data")
+        substep1_start = time.time()
+        try:
+            ret = self.process_mm_data(
+                input_text=input_text,
+                images=images,
+                audios=audios,
+                videos=videos,
+                **kwargs,
+            )
+            logger.info(f"[DEBUG_TRACE] process_mm_data returned successfully")
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] Exception in process_mm_data: {e}", exc_info=True
+            )
+            raise
+        substep1_duration = (time.time() - substep1_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL]   Step 5.1 - HF processor __call__: {substep1_duration:.2f} ms"
+        )
 
+        # Step 5.2: Extract input_ids
+        logger.info(f"[DEBUG_TRACE] About to extract input_ids")
+        substep2_start = time.time()
+        try:
+            input_ids = ret["input_ids"].flatten()
+            logger.info(
+                f"[DEBUG_TRACE] Extracted input_ids with shape: {input_ids.shape}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] Exception extracting input_ids: {e}", exc_info=True
+            )
+            raise
+        substep2_duration = (time.time() - substep2_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL]   Step 5.2 - Extract input_ids: {substep2_duration:.2f} ms"
+        )
+
+        # Step 5.3: Collect mm_items from processor output
+        logger.info(f"[DEBUG_TRACE] About to collect mm_items from processor output")
+        substep3_start = time.time()
+        try:
+            collected_items = self.collect_mm_items_from_processor_output(ret)
+            logger.info(f"[DEBUG_TRACE] Collected {len(collected_items)} mm_items")
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] Exception collecting mm_items: {e}", exc_info=True
+            )
+            raise
+        substep3_duration = (time.time() - substep3_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL]   Step 5.3 - Collect mm_items: {substep3_duration:.2f} ms"
+        )
+
+        logger.info(
+            f"[DEBUG_TRACE] _process_and_collect_mm_items returning successfully"
+        )
         return collected_items, input_ids, ret
 
     def process_and_combine_mm_data(
@@ -627,19 +813,38 @@ class BaseMultimodalProcessor(ABC):
         Returns:
             Tuple of (list of mm_items, input_ids)
         """
-        # Collect all items and categorize them
-        all_items = base_output.organize_results()
+        import time
+
+        logger.info(f"[DEBUG_TRACE] Entering process_and_combine_mm_data")
+        overall_start = time.time()
+
+        # Step 1: Categorize items
+        logger.info(f"[DEBUG_TRACE] Step 4 - About to organize results")
+        step1_start = time.time()
+        try:
+            all_items = base_output.organize_results()
+            logger.info(f"[DEBUG_TRACE] Organized {len(all_items)} items")
+        except Exception as e:
+            logger.error(
+                f"[DEBUG_TRACE] Exception in organize_results: {e}", exc_info=True
+            )
+            raise
         # Handle text-only case
         if not all_items:
+            logger.info(f"[DEBUG_TRACE] Text-only case, no multimodal items")
             input_ids = self._processor.tokenizer(
                 base_output.input_text,
                 return_tensors="pt",
                 add_special_tokens=True,
             ).input_ids.flatten()
+            logger.info(f"[DEBUG_TRACE] Returning early for text-only")
             return [], input_ids, {}
 
+        logger.info(f"[DEBUG_TRACE] Categorizing {len(all_items)} items by type")
         dict_items, raw_images, raw_audios, raw_videos = [], [], [], []
-        for modality, item in all_items:
+        for idx, (modality, item) in enumerate(all_items):
+            if idx % 10 == 0:
+                logger.info(f"[DEBUG_TRACE] Categorizing item {idx}/{len(all_items)}")
             if isinstance(item, dict):
                 dict_items.append(item)
             elif modality == Modality.IMAGE:
@@ -650,21 +855,52 @@ class BaseMultimodalProcessor(ABC):
                 raw_videos.append(item)
             else:
                 raise ValueError(f"Unknown multimodal item type: {type(item)}")
-        # Process items and get input_ids
+        step1_duration = (time.time() - step1_start) * 1000
+        logger.info(
+            f"[MM_PREPROC_DETAIL] Step 4 - Categorize items: {step1_duration:.2f} ms"
+        )
+        logger.info(
+            f"[DEBUG_TRACE] Categorized: {len(dict_items)} dict, {len(raw_images)} images, {len(raw_audios)} audios, {len(raw_videos)} videos"
+        )
+
+        # Step 2: Process raw items (HF processor call)
         all_collected_items: list[MultimodalDataItem] = []
         input_ids = None
+        step2_duration = (
+            0.0  # Initialize to handle case where no raw items need processing
+        )
 
-        # Handle raw items (need processing)
         if raw_images or raw_audios or raw_videos:
-            collected_items, input_ids, ret = self._process_and_collect_mm_items(
-                input_text=base_output.input_text,
-                images=raw_images,
-                audios=raw_audios,
-                videos=raw_videos,
-                **kwargs,
+            logger.info(
+                f"[DEBUG_TRACE] Step 5 - About to call _process_and_collect_mm_items"
+            )
+            step2_start = time.time()
+            try:
+                collected_items, input_ids, ret = self._process_and_collect_mm_items(
+                    input_text=base_output.input_text,
+                    images=raw_images,
+                    audios=raw_audios,
+                    videos=raw_videos,
+                    **kwargs,
+                )
+                logger.info(
+                    f"[DEBUG_TRACE] _process_and_collect_mm_items returned {len(collected_items)} items"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[DEBUG_TRACE] Exception in _process_and_collect_mm_items: {e}",
+                    exc_info=True,
+                )
+                raise
+            step2_duration = (time.time() - step2_start) * 1000
+            logger.info(
+                f"[MM_PREPROC_DETAIL] Step 5 - HF processor call: {step2_duration:.2f} ms"
             )
             all_collected_items = collected_items
         else:
+            logger.info(
+                f"[DEBUG_TRACE] No raw items to process, skipping HF processor call"
+            )
             ret = None
 
         # Handle dict items (already processed)
@@ -737,4 +973,17 @@ class BaseMultimodalProcessor(ABC):
                             sync_buffer_meta=sync_flag,
                         )
 
+        logger.info(
+            f"[DEBUG_TRACE] About to finalize and return from process_and_combine_mm_data"
+        )
+        overall_duration = (time.time() - overall_start) * 1000
+        # Calculate sum of steps
+        total_steps = step1_duration + step2_duration
+        logger.info(
+            f"[MM_PREPROC_DETAIL] === process_and_combine_mm_data TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ==="
+        )
+
+        logger.info(
+            f"[DEBUG_TRACE] process_and_combine_mm_data returning successfully with {len(all_collected_items)} items"
+        )
         return all_collected_items, input_ids, ret

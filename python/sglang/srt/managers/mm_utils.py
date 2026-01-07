@@ -2,7 +2,6 @@
 Multi-modality utils
 """
 
-import os
 import pickle
 from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
@@ -25,11 +24,9 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
     flatten_nested_list,
     is_cuda_alike,
-    is_hip,
     is_npu,
     print_warning_once,
 )
-from sglang.utils import logger
 
 _is_npu = is_npu()
 
@@ -133,7 +130,7 @@ class TransportProxyTensor(torch.Tensor):
 
             try:
                 target_device = torch.device(f"cuda:{source_device_index}")
-                
+
                 with torch.cuda.device(target_device):
                     storage = torch.UntypedStorage._new_shared_cuda(*handle)
                     reconstructed_tensor = torch.empty(
@@ -385,9 +382,23 @@ def _get_chunked_prefill_embedding(
     extend_length: List[int],
     items_offset_list: List[List[Tuple[int, int]]],
 ) -> Tuple[Optional[torch.Tensor], int]:
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+
+    torch.cuda.synchronize()
+    overall_start = time.time()
+
     # Calculate embedding for each request, try to get it from cache to avoid repeated calculation
     embedding_list = []
     expected_token_count = 0
+    cache_hit_count = 0
+    cache_miss_count = 0
+    total_cache_lookup_time = 0
+    total_vit_inference_time = 0
+    total_chunk_processing_time = 0
+
     # FIXME(Xinyuan): temporary workaround for eagle3, which may have len(items_size) > len(prefix_length)
     if not get_global_server_args().mm_enable_dp_encoder:
         max_iterations = min(len(items_size) - 1, len(prefix_length))
@@ -397,13 +408,32 @@ def _get_chunked_prefill_embedding(
             embedding_items_per_req = embedding_items[items_size[i] : items_size[i + 1]]
             items_offset = items_offset_list[i]
             assert items_offset is not None, items_offset
+
+            # Cache lookup
+            torch.cuda.synchronize()
+            cache_lookup_start = time.time()
             embedding_items_hash = get_embedding_hash(embedding_items_per_req)
             # if all items has been prefixed, we do not need to calculate embedding
             if all([offset_end < prefix_length[i] for _, offset_end in items_offset]):
                 continue
             embedding_per_req = embedding_cache.get(embedding_items_hash)
+            torch.cuda.synchronize()
+            cache_lookup_time = time.time() - cache_lookup_start
+            total_cache_lookup_time += cache_lookup_time
+
             if embedding_per_req is None:
+                cache_miss_count += 1
+                # ViT inference
+                vit_inference_start = time.time()
+                torch.cuda.synchronize()
                 embedding_per_req = data_embedding_func(embedding_items_per_req)
+                torch.cuda.synchronize()
+                vit_inference_time = time.time() - vit_inference_start
+                total_vit_inference_time += vit_inference_time
+                logger.info(
+                    f"[VIT_DETAIL] Step 2.1.1 - ViT inference (cache miss {cache_miss_count}): {vit_inference_time * 1000:.2f} ms"
+                )
+
                 if not embedding_cache.put(embedding_items_hash, embedding_per_req):
                     print_warning_once(
                         "Multimodal embedding cache is full. This typically occurs when a single "
@@ -411,39 +441,85 @@ def _get_chunked_prefill_embedding(
                         "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
                         "embedding size."
                     )
+            else:
+                cache_hit_count += 1
+                logger.info(
+                    f"[VIT_DETAIL] Step 2.1.1 - ViT inference (cache hit {cache_hit_count}): 0.00 ms (cached)"
+                )
 
+            # Chunk processing
+            torch.cuda.synchronize()
+            chunk_start = time.time()
             embedding_per_req_chunk, start_idx, end_idx = get_embedding_chunk(
                 embedding=embedding_per_req,
                 extend_prefix_len=prefix_length[i],
                 extend_seq_len=extend_length[i] if i < len(extend_length) else 0,
                 items_offset=items_offset,
             )
+            torch.cuda.synchronize()
+            chunk_time = time.time() - chunk_start
+            total_chunk_processing_time += chunk_time
+
             embedding_list.append(embedding_per_req_chunk)
             expected_token_count += end_idx - start_idx
     else:
+        # Hash computation
+        torch.cuda.synchronize()
+        hash_start = time.time()
         embedding_items_hash_list = get_embedding_hash_list(embedding_items)
+        torch.cuda.synchronize()
+        hash_time = (time.time() - hash_start) * 1000
+        logger.info(f"[VIT_DETAIL] Step 2.1.0 - Hash computation: {hash_time:.2f} ms")
 
         embedding_items_uncached = []
         embedding_items_hash_list_uncached = []
         embedding_items_feature_num = []
+
+        # Cache lookup
+        torch.cuda.synchronize()
+        cache_lookup_start = time.time()
         for i in range(len(embedding_items)):
             embedding_per_req = embedding_cache.get(embedding_items_hash_list[i])
             embedding_list.append(embedding_per_req)
             if embedding_per_req is None:
+                cache_miss_count += 1
                 embedding_items_uncached.append(embedding_items[i])
                 if embedding_items[i].modality == Modality.AUDIO:
-                    embedding_items_feature_num.append(1) # audio always has 1 object
+                    embedding_items_feature_num.append(1)  # audio always has 1 object
                 elif embedding_items[i].modality == Modality.IMAGE:
                     embedding_items_feature_num.append(
                         embedding_items[i].image_grid_thw.shape[0]
                     )
                 else:
                     # TODO: Handle the case where embedding_items[i].modality is VIDEO.
-                    print_warning_once(f"Cannot handel type { embedding_items[i].modality}")
+                    print_warning_once(
+                        f"Cannot handle type { embedding_items[i].modality}"
+                    )
                 embedding_items_hash_list_uncached.append(embedding_items_hash_list[i])
+            else:
+                cache_hit_count += 1
+        torch.cuda.synchronize()
+        cache_lookup_time = time.time() - cache_lookup_start
+        total_cache_lookup_time = cache_lookup_time
+        logger.info(
+            f"[VIT_DETAIL] Step 2.1.1 - Cache lookup: {cache_lookup_time * 1000:.2f} ms (hits: {cache_hit_count}, misses: {cache_miss_count})"
+        )
 
         if None in embedding_list:
+            # ViT inference for uncached items
+            vit_inference_start = time.time()
+            torch.cuda.synchronize()
             embeddings = data_embedding_func(embedding_items_uncached)
+            torch.cuda.synchronize()
+            vit_inference_time = time.time() - vit_inference_start
+            total_vit_inference_time = vit_inference_time
+            logger.info(
+                f"[VIT_DETAIL] Step 2.1.2 - ViT inference (batch {len(embedding_items_uncached)} items): {vit_inference_time * 1000:.2f} ms"
+            )
+
+            # Merge embeddings
+            torch.cuda.synchronize()
+            merge_start = time.time()
             embeddings_merged = []
             embeddings_idx = 0
             for feature_num in embedding_items_feature_num:
@@ -452,14 +528,25 @@ def _get_chunked_prefill_embedding(
                 elif embedding_items[i].modality == Modality.IMAGE:
                     embeddings_merged.append(
                         torch.cat(
-                            embeddings[embeddings_idx : embeddings_idx + feature_num], dim=0
+                            embeddings[embeddings_idx : embeddings_idx + feature_num],
+                            dim=0,
                         )
                     )
                 else:
                     # TODO: Handle the case where embedding_items[i].modality is VIDEO.
-                    print_warning_once(f"Cannot handel type { embedding_items[i].modality}")
+                    print_warning_once(
+                        f"Cannot handle type { embedding_items[i].modality}"
+                    )
                 embeddings_idx += feature_num
+            torch.cuda.synchronize()
+            merge_time = (time.time() - merge_start) * 1000
+            logger.info(
+                f"[VIT_DETAIL] Step 2.1.3 - Merge embeddings: {merge_time:.2f} ms"
+            )
 
+            # Cache put
+            torch.cuda.synchronize()
+            cache_put_start = time.time()
             for embedding_items_hash, embedding_per_req in zip(
                 embedding_items_hash_list_uncached, embeddings_merged
             ):
@@ -470,12 +557,29 @@ def _get_chunked_prefill_embedding(
                         "`SGLANG_VLM_CACHE_SIZE_MB` environment variable or reducing the input "
                         "embedding size."
                     )
+            torch.cuda.synchronize()
+            cache_put_time = (time.time() - cache_put_start) * 1000
+            logger.info(f"[VIT_DETAIL] Step 2.1.4 - Cache put: {cache_put_time:.2f} ms")
+        else:
+            logger.info(
+                f"[VIT_DETAIL] Step 2.1.2 - ViT inference: 0.00 ms (all cached)"
+            )
+
+        # Fill in cached embeddings
+        torch.cuda.synchronize()
+        fill_start = time.time()
         embeddings_merged_idx = 0
         for i in range(len(embedding_list)):
             if embedding_list[i] is None:
                 embedding_list[i] = embeddings_merged[embeddings_merged_idx]
                 embeddings_merged_idx += 1
+        torch.cuda.synchronize()
+        fill_time = (time.time() - fill_start) * 1000
+        logger.info(f"[VIT_DETAIL] Step 2.1.5 - Fill embeddings: {fill_time:.2f} ms")
 
+        # Chunk processing
+        torch.cuda.synchronize()
+        chunk_start = time.time()
         for i in range(len(embedding_items)):
             embedding_per_req_chunk, start_idx, end_idx = get_embedding_chunk(
                 embedding=embedding_list[i],
@@ -485,9 +589,33 @@ def _get_chunked_prefill_embedding(
             )
             embedding_list[i] = embedding_per_req_chunk
             expected_token_count += end_idx - start_idx
+        torch.cuda.synchronize()
+        chunk_time = time.time() - chunk_start
+        total_chunk_processing_time = chunk_time
+        logger.info(
+            f"[VIT_DETAIL] Step 2.1.6 - Chunk processing: {chunk_time * 1000:.2f} ms"
+        )
+
     if len(embedding_list) == 0:
         return None
-    return torch.concat(embedding_list, dim=0), expected_token_count
+
+    torch.cuda.synchronize()
+    concat_start = time.time()
+    result = torch.concat(embedding_list, dim=0)
+    torch.cuda.synchronize()
+    concat_time = (time.time() - concat_start) * 1000
+    logger.info(f"[VIT_DETAIL] Step 2.1.7 - Concat embeddings: {concat_time:.2f} ms")
+
+    torch.cuda.synchronize()
+    overall_duration = (time.time() - overall_start) * 1000
+    logger.info(
+        f"[VIT_DETAIL] === _get_chunked_prefill_embedding TOTAL: {overall_duration:.2f} ms ==="
+    )
+    logger.info(
+        f"[VIT_DETAIL] Summary - Cache hits: {cache_hit_count}, Cache misses: {cache_miss_count}, Total ViT inference time: {total_vit_inference_time * 1000:.2f} ms"
+    )
+
+    return result, expected_token_count
 
 
 def _get_multimodal_mask(
@@ -557,7 +685,17 @@ def get_embedding_and_mask(
         - The generated embeddings tensor
         - A boolean mask tensor indicating where these embeddings should be placed
     """
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+
+    torch.cuda.synchronize()
+    overall_start = time.time()
+
     # 1. Get embedding
+    torch.cuda.synchronize()
+    step1_start = time.time()
     embedding = _get_precomputed_embedding(embedding_items)
     if embedding is None:
         embedding, expected_token_count = _get_chunked_prefill_embedding(
@@ -570,14 +708,41 @@ def get_embedding_and_mask(
         )
         if embedding is None:
             return None, None
+    torch.cuda.synchronize()
+    step1_duration = (time.time() - step1_start) * 1000
+    logger.info(
+        f"[VIT_DETAIL] Step 2.1 - Get embeddings (cache or compute): {step1_duration:.2f} ms"
+    )
+
     # 2. Get mask
+    torch.cuda.synchronize()
+    step2_start = time.time()
     if _is_npu:
         torch.npu.current_stream().synchronize()
     special_multimodal_mask = _get_multimodal_mask(input_ids, placeholder_tensor)
+    torch.cuda.synchronize()
+    step2_duration = (time.time() - step2_start) * 1000
+    logger.info(f"[VIT_DETAIL] Step 2.2 - Get multimodal mask: {step2_duration:.2f} ms")
+
     # 3. Adjust embedding length if needed
+    torch.cuda.synchronize()
+    step3_start = time.time()
     embedding = _adjust_embedding_length(
         embedding, special_multimodal_mask, logger, expected_token_count
     )
+    torch.cuda.synchronize()
+    step3_duration = (time.time() - step3_start) * 1000
+    logger.info(
+        f"[VIT_DETAIL] Step 2.3 - Adjust embedding length: {step3_duration:.2f} ms"
+    )
+
+    torch.cuda.synchronize()
+    total_steps = step1_duration + step2_duration + step3_duration
+    overall_duration = (time.time() - overall_start) * 1000
+    logger.info(
+        f"[VIT_DETAIL] === get_embedding_and_mask TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ==="
+    )
+
     return embedding, special_multimodal_mask
 
 
@@ -608,21 +773,36 @@ def embed_mm_inputs(
     Returns:
         Combined embedding tensor with multimodal content integrated
     """
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+
+    torch.cuda.synchronize()
+    overall_start = time.time()
+
     other_info = {}
     if mm_inputs_list is None:
         return None
 
     # 1. Calculate the multimodal data which exists in input_ids, with the help of pad_values
     # we assume that multimodal data are represented with its pad_values in input_ids
+    torch.cuda.synchronize()
+    step1_start = time.time()
     item_flatten_list = []
     for mm_inputs in mm_inputs_list:
         item_flatten_list += [item for item in mm_inputs.mm_items if item is not None]
+    torch.cuda.synchronize()
+    step1_duration = (time.time() - step1_start) * 1000
+    logger.info(f"[VIT_DETAIL] Step 1 - Flatten MM items: {step1_duration:.2f} ms")
 
     # deepstack_embeddings: per-modality
     modalities, embeddings, masks, deepstack_embeddings = [], [], [], []
 
     # 2. Get multimodal embedding separately
     # Try get mm embedding if any
+    torch.cuda.synchronize()
+    step2_start = time.time()
     for modality in Modality.all():
         items = [
             item for item in item_flatten_list if item.is_modality(modality=modality)
@@ -676,8 +856,13 @@ def embed_mm_inputs(
             modalities += [modality]
             embeddings += [embedding]
             masks += [mask]
+    torch.cuda.synchronize()
+    step2_duration = (time.time() - step2_start) * 1000
+    logger.info(f"[VIT_DETAIL] Step 2 - Get MM embeddings: {step2_duration:.2f} ms")
 
     # 3. Get input embeddings
+    torch.cuda.synchronize()
+    step3_start = time.time()
     vocab_size = input_embedding.num_embeddings
     # Important: clamp after getting original multimodal regions
     # Clamp input ids. This is because the input_ids for the multimodal tokens are
@@ -701,9 +886,14 @@ def embed_mm_inputs(
         )
 
         other_info["input_deepstack_embeds"] = input_deepstack_embeds
+    torch.cuda.synchronize()
+    step3_duration = (time.time() - step3_start) * 1000
+    logger.info(f"[VIT_DETAIL] Step 3 - Get text embeddings: {step3_duration:.2f} ms")
 
     # 4. scatter embeddings into input embedding
     # Use masked_scatter_ to completely avoid D2D synchronization
+    torch.cuda.synchronize()
+    step4_start = time.time()
     for i, modality, embedding, mask in zip(
         range(len(embeddings)), modalities, embeddings, masks
     ):
@@ -733,6 +923,16 @@ def embed_mm_inputs(
                     inputs_embeds.device, inputs_embeds.dtype
                 )
             input_deepstack_embeds.masked_scatter_(mask_1d.unsqueeze(-1), deepstack_emb)
+    torch.cuda.synchronize()
+    step4_duration = (time.time() - step4_start) * 1000
+    logger.info(f"[VIT_DETAIL] Step 4 - Scatter embeddings: {step4_duration:.2f} ms")
+
+    torch.cuda.synchronize()
+    total_steps = step1_duration + step2_duration + step3_duration + step4_duration
+    overall_duration = (time.time() - overall_start) * 1000
+    logger.info(
+        f"[VIT_DETAIL] === embed_mm_inputs TOTAL: {overall_duration:.2f} ms (sum of steps: {total_steps:.2f} ms) ==="
+    )
 
     return inputs_embeds, other_info
 
@@ -764,6 +964,11 @@ def general_mm_embed_routine(
     Returns:
         Hidden states from language model forward pass
     """
+    import logging
+    import time
+
+    logger = logging.getLogger(__name__)
+
     assert hasattr(language_model, "get_input_embeddings")
     embed_tokens = language_model.get_input_embeddings()
     if (
@@ -784,6 +989,44 @@ def general_mm_embed_routine(
             for i, seq_len in enumerate(forward_batch.extend_seq_lens_cpu)
             if forward_batch.mm_inputs[i] is not None
         ]
+
+        # Synchronize before starting timing to ensure all previous GPU operations are complete
+        torch.cuda.synchronize()
+        vit_start_time = time.time()
+
+        # Check how many encoders are cached vs need computation
+        num_cached = 0
+        num_to_encode = 0
+        has_encoder_cached_attr = hasattr(forward_batch, "encoder_cached")
+        print(
+            f"[VIT_DEBUG] forward_batch has encoder_cached: {has_encoder_cached_attr}",
+            flush=True,
+        )
+
+        if has_encoder_cached_attr and forward_batch.encoder_cached:
+            print(
+                f"[VIT_DEBUG] encoder_cached values: {forward_batch.encoder_cached}",
+                flush=True,
+            )
+            for i, mm_input in enumerate(forward_batch.mm_inputs):
+                if mm_input is not None:
+                    if (
+                        i < len(forward_batch.encoder_cached)
+                        and forward_batch.encoder_cached[i]
+                    ):
+                        num_cached += 1
+                    else:
+                        num_to_encode += 1
+        else:
+            # For models like Qwen3-VL that don't use encoder_cached
+            num_mm_inputs = sum(
+                1 for mm_input in forward_batch.mm_inputs if mm_input is not None
+            )
+            print(
+                f"[VIT_DEBUG] No encoder_cached, counting mm_inputs: {num_mm_inputs}",
+                flush=True,
+            )
+
         inputs_embeds, other_info = embed_mm_inputs(
             mm_inputs_list=mm_inputs_list,
             extend_prefix_lens=extend_prefix_lens,
@@ -795,6 +1038,25 @@ def general_mm_embed_routine(
             placeholder_tokens=placeholder_tokens,
             use_deepstack=use_deepstack,
         )
+
+        # Synchronize after to ensure ViT encoding is complete before recording end time
+        torch.cuda.synchronize()
+        vit_end_time = time.time()
+        vit_encoding_time = vit_end_time - vit_start_time
+
+        # Log with cache information
+        if num_cached > 0 or num_to_encode > 0:
+            msg = f"[TTFT_BREAKDOWN] ViT encoding + embedding time: {vit_encoding_time * 1000:.2f} ms (cached: {num_cached}, encoded: {num_to_encode})"
+            logger.info(msg)
+            print(msg, flush=True)
+        else:
+            msg = f"[TTFT_BREAKDOWN] ViT encoding + embedding time: {vit_encoding_time * 1000:.2f} ms"
+            logger.info(msg)
+            print(msg, flush=True)
+
+        # Store timing in forward_batch
+        forward_batch.vit_encoding_time = vit_encoding_time
+
         # add for qwen3_vl deepstack
         if use_deepstack:
             kwargs["input_deepstack_embeds"] = other_info["input_deepstack_embeds"]
@@ -804,12 +1066,28 @@ def general_mm_embed_routine(
     else:
         inputs_embeds = embed_tokens(input_ids)
 
+    # Synchronize before LLM forward timing
+    torch.cuda.synchronize()
+    llm_prefill_start_time = time.time()
+
     hidden_states = language_model(
         input_ids=None,
         forward_batch=forward_batch,
         input_embeds=inputs_embeds,
         **kwargs,
     )
+
+    # Synchronize after LLM forward to ensure completion
+    torch.cuda.synchronize()
+    llm_prefill_end_time = time.time()
+    llm_prefill_time = llm_prefill_end_time - llm_prefill_start_time
+    logger.info(
+        f"[TTFT_BREAKDOWN] LLM prefill forward time: {llm_prefill_time * 1000:.2f} ms"
+    )
+
+    # Store timing in forward_batch
+    forward_batch.llm_prefill_time = llm_prefill_time
+
     return hidden_states
 
 

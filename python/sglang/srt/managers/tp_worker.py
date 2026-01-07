@@ -374,6 +374,10 @@ class TpModelWorker(BaseTpWorker):
             batch_result = GenerationBatchResult(
                 logits_output=logits_output,
                 can_run_cuda_graph=can_run_cuda_graph,
+                prefill_preparation_time=forward_batch.prefill_preparation_time,
+                vit_encoding_time=forward_batch.vit_encoding_time,
+                llm_prefill_time=forward_batch.llm_prefill_time,
+                total_model_forward_time=forward_batch.total_model_forward_time,
             )
 
             if is_verify:
