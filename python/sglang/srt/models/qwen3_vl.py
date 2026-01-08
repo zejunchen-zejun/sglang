@@ -74,7 +74,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     get_int_env_var,
     is_hip,
-    is_npu
+    is_npu,
 )
 from sglang.srt.utils.hf_transformers_utils import get_processor
 
@@ -566,7 +566,6 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
                 cu_seqlens = cu_seqlens.to("cpu")
         else:
             cu_seqlens = None
-
         x = x.unsqueeze(1)
 
         deepstack_feature_lists = []

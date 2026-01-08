@@ -70,6 +70,12 @@ class VisionForwardMetadata:
     max_seqlen: int
 
 @dataclasses.dataclass
+class VisionForwardMetadata:
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+
+
+@dataclasses.dataclass
 class SingletonCache:
     data: Any = None
 
@@ -724,7 +730,7 @@ class VisionAttention(nn.Module):
             **norm_kwargs,
         )
         return q_norm, k_norm
-    
+
     def init_vision_forward_metadata(self, grid_thw, pixel_values):
         cu_seqlens = torch.cat(
             [
