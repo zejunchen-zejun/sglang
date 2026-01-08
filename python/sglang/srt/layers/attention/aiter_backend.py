@@ -595,7 +595,7 @@ class AiterAttnBackend(AttentionBackend):
         get_pa_metadata_v1(
             seqlens_qo_indptr=qo_indptr,
             pages_kv_indptr=pages_kv_indptr,
-            context_lens=context_lens,
+            context_lens=context_lens.int(),
             num_heads_per_head_k=tp_q_head_num // self.num_kv_head,
             num_heads_k=self.num_kv_head,
             is_causal=True,
