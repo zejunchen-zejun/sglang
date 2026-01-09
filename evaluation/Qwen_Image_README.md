@@ -131,5 +131,42 @@ sglang generate "${SERVER_ARGS[@]}" "${SAMPLING_ARGS[@]}"
 ```
 
 # Benchmark (WIP)
+Benchmark ti2i(edit) model
+```bash
+#!/bin/bash
 
+input_image="./qwen_image_edit_input.png"
+num_prompts=10
+image_resolution="768x1024"
+port=30000
+width=768
+height=1024
+
+if [ ! -f "$input_image" ]; then
+    echo "Downloading input image..."
+    wget -O "$input_image" "https://raw.githubusercontent.com/modelscope/DiffSynth-Engine/dev/qz/qwen_app_amd/examples/input/qwen_image_edit_input.png" || {
+        echo "Error: Download image failed"
+        exit 1
+    }
+else
+    echo "Input image already exists, skip downloading."
+fi
+
+echo "num prompts: ${num_prompts}"
+echo "image-resolution: ${image_resolution} (${width}x${height})"
+echo "port: ${port}"
+echo "dataset: ${dataset_path}"
+echo "input image path: ${input_image}"
+
+
+python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
+    --backend sglang-image \
+    --task ti2i \
+    --dataset vbench \
+    --num-prompts ${num_prompts} \
+    --width ${width} \
+    --height ${height} \
+    --port ${port} \
+
+```
 # Evaluation (WIP)
