@@ -8,5 +8,6 @@ curl -sS -X POST "http://localhost:30000/v1/images/edits" \
   -F "guidance_scale=4.0" \
   -F "embedded_guidance_scale=6.0" \
   -F "seed=0" \
+  -F "num_inference_steps=8" \
   -F "response_format=b64_json"
 
