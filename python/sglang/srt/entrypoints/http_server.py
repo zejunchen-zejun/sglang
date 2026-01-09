@@ -634,16 +634,7 @@ async def clear_hicache_storage_backend():
 
 @app.api_route("/start_profile", methods=["GET", "POST"])
 async def start_profile_async(obj: Optional[ProfileReqInput] = None):
-    """
-    Start profiling the scheduler (GPU operations) and optionally the host process.
-
-    By default, this profiles both:
-    - Scheduler: GPU operations (forward pass, attention, etc.)
-    - Host: CPU operations (tokenization, multimodal preprocessing)
-
-    Set include_host=false to only profile the scheduler.
-    Set merge_profiles=true to merge all traces into a single file.
-    """
+    """Start profiling."""
     if obj is None:
         obj = ProfileReqInput()
 
@@ -666,15 +657,7 @@ async def start_profile_async(obj: Optional[ProfileReqInput] = None):
 
 @app.api_route("/stop_profile", methods=["GET", "POST"])
 async def stop_profile_async():
-    """
-    Stop profiling the scheduler and host processes.
-
-    This stops both the scheduler profiler (GPU operations) and the host
-    profiler (CPU operations) if they were started together.
-
-    If merge_profiles was set to true when starting, traces will be merged
-    into a single file for easy visualization.
-    """
+    """Stop profiling."""
     await _global_state.tokenizer_manager.stop_profile()
     return Response(
         content="Stop profiling. This will take some time.\n",

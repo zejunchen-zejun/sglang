@@ -317,20 +317,6 @@ class TokenizerCommunicatorMixin:
         merge_profiles: bool = False,
         include_host: bool = True,
     ):
-        """
-        Start profiling the scheduler (GPU operations) and optionally the host process.
-
-        Args:
-            output_dir: Directory to save profile traces
-            start_step: Step to start profiling at
-            num_steps: Number of steps to profile
-            activities: Activities to profile (CPU, GPU, MEM, etc.)
-            with_stack: Whether to record stack traces
-            record_shapes: Whether to record tensor shapes
-            profile_by_stage: Whether to profile by prefill/decode stages
-            merge_profiles: Whether to merge profiles from all ranks
-            include_host: Whether to also profile the host process (default: True)
-        """
         self.auto_create_handle_loop()
         env_with_stack: bool = get_bool_env_var("SGLANG_PROFILE_WITH_STACK", "true")
         with_stack = False if with_stack is False or env_with_stack is False else True
@@ -373,12 +359,6 @@ class TokenizerCommunicatorMixin:
         return await self._execute_profile(req)
 
     async def stop_profile(self: TokenizerManager, include_host: bool = True):
-        """
-        Stop profiling the scheduler and optionally the host process.
-
-        Args:
-            include_host: Whether to also stop the host profiler (default: True)
-        """
         self.auto_create_handle_loop()
 
         # Stop host profiler first
