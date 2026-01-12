@@ -11,6 +11,8 @@ import zmq
 from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
     MergeLoraWeightsReq,
     SetLoraReq,
+    StartProfileReq,
+    StopProfileReq,
     UnmergeLoraWeightsReq,
     _parse_size,
 )
@@ -77,6 +79,8 @@ class Scheduler:
             SetLoraReq: self._handle_set_lora,
             MergeLoraWeightsReq: self._handle_merge_lora,
             UnmergeLoraWeightsReq: self._handle_unmerge_lora,
+            StartProfileReq: self._handle_start_profile,
+            StopProfileReq: self._handle_stop_profile,
             Req: self._handle_generation,
             List[Req]: self._handle_generation,
         }
@@ -104,6 +108,20 @@ class Scheduler:
     def _handle_unmerge_lora(self, reqs: List[Any]) -> OutputBatch:
         req = reqs[0]
         return self.worker.unmerge_lora_weights(req.target)
+
+    def _handle_start_profile(self, reqs: List[Any]) -> OutputBatch:
+        req = reqs[0]
+        return self.worker.start_profile(
+            output_dir=req.output_dir,
+            profile_id=req.profile_id,
+            activities=req.activities,
+            with_stack=req.with_stack,
+            record_shapes=req.record_shapes,
+        )
+
+    def _handle_stop_profile(self, reqs: List[Any]) -> OutputBatch:
+        req = reqs[0]
+        return self.worker.stop_profile(export_trace=req.export_trace)
 
     def _handle_generation(self, reqs: List[Req]):
         has_warmup = any(req.is_warmup for req in reqs)

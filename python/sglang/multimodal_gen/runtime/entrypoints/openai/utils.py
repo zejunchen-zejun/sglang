@@ -41,6 +41,25 @@ class UnmergeLoraWeightsReq:
     target: str = "all"  # "all", "transformer", "transformer_2", "critic"
 
 
+@dataclasses.dataclass
+class StartProfileReq:
+    """Request to start profiling in GPU Worker process."""
+    output_dir: Optional[str] = None
+    profile_id: Optional[str] = None
+    # Activities to profile: ["CPU", "GPU"]
+    activities: Optional[List[str]] = None
+    with_stack: Optional[bool] = None
+    record_shapes: Optional[bool] = None
+
+
+@dataclasses.dataclass
+class StopProfileReq:
+    """
+    Request to stop profiling and save traces in GPU Worker process.
+    """ 
+    export_trace: bool = True
+
+
 def _parse_size(size: str) -> tuple[int, int] | tuple[None, None]:
     try:
         parts = size.lower().replace(" ", "").split("x")
