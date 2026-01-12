@@ -130,6 +130,33 @@ SAMPLING_ARGS=(
 sglang generate "${SERVER_ARGS[@]}" "${SAMPLING_ARGS[@]}"
 ```
 
-# Benchmark (WIP)
+# Benchmark
+Online benchmark ti2i(qwen image edit) model, first, one window starts the server with the command below:
 
+```bash
+sglang serve --model-path Qwen/Qwen-Image-Edit-2511 --lora_path lightx2v/Qwen-Image-Edit-2511-Lightning  --num-gpus 1 --ulysses-degree=1 --image-encoder-precision bf16 --vae-precision bf16  --host 0.0.0.0 --port 30000
+```
+Second, Use another window to send requests, with the default "i2v-bench-info.json" parameter(s) from the VBench dataset.
+```bash
+#!/bin/bash
+num_prompts=10
+image_resolution="768x1024"
+port=30000
+width=768
+height=1024
+
+echo "num prompts: ${num_prompts}"
+echo "image-resolution: ${image_resolution} (${width}x${height})"
+echo "port: ${port}"
+
+python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
+    --backend sglang-image \
+    --task ti2i \
+    --dataset vbench \
+    --num-prompts ${num_prompts} \
+    --width ${width} \
+    --height ${height} \
+    --port ${port} \
+
+```
 # Evaluation (WIP)
