@@ -130,33 +130,85 @@ SAMPLING_ARGS=(
 sglang generate "${SERVER_ARGS[@]}" "${SAMPLING_ARGS[@]}"
 ```
 
-# Benchmark
-Online benchmark ti2i(qwen image edit) model, first, one window starts the server with the command below:
+# Online Server
 
-```bash
-sglang serve --model-path Qwen/Qwen-Image-Edit-2511 --lora_path lightx2v/Qwen-Image-Edit-2511-Lightning  --num-gpus 1 --ulysses-degree=1 --image-encoder-precision bf16 --vae-precision bf16  --host 0.0.0.0 --port 30000
+## Custom Dataset
+Download picture form https://github.com/modelscope/DiffSynth-Engine/blob/dev/qz/qwen_app_amd/examples/input/768x1024.png
+To create a custom dataset for benchmarking, follow this structure:
+
 ```
-Second, Use another window to send requests, with the default "i2v-bench-info.json" parameter(s) from the VBench dataset.
-```bash
-#!/bin/bash
-num_prompts=10
-image_resolution="768x1024"
-port=30000
-width=768
-height=1024
+/home/yajizhan/dev/benchmark_data/
+├── data/
+│   ├── i2v-bench-info.json
+│   └── origin/
+│       └── 768x1024.png
+```
 
-echo "num prompts: ${num_prompts}"
-echo "image-resolution: ${image_resolution} (${width}x${height})"
-echo "port: ${port}"
+Example `i2v-bench-info.json`:
+
+```json
+[
+    {"file_name": "768x1024.png", "caption": "make the clothes to red"},
+    {"file_name": "768x1024.png", "caption": "make the clothes to red"},
+    {"file_name": "768x1024.png", "caption": "make the clothes to red"},
+    {"file_name": "768x1024.png", "caption": "make the clothes to red"},
+    {"file_name": "768x1024.png", "caption": "make the clothes to red"}
+]
+```
+
+### 1. Start the server with profiling environment
+
+```bash
+export PYTHONPATH=/path/to/sglang/python
+export SGLANG_TORCH_PROFILER_DIR=./sglang_qwen_profiling
+export SGLANG_PROFILE_WITH_STACK=1
+export SGLANG_PROFILE_RECORD_SHAPES=1
+export CUDA_VISIBLE_DEVICES=0,1
+export SGLANG_CACHE_DIT_ENABLED=true
+
+sglang serve \
+    --model-path /mnt/raid0/pretrained_model/Qwen-Image-Edit \
+    --lora_path /mnt/raid0/pretrained_model/Qwen-Image-Edit-2511-Lightning \
+    --num-gpus 2 \
+    --ulysses-degree 2 \
+    --image-encoder-precision bf16 \
+    --vae-precision bf16 \
+    --host 0.0.0.0 \
+    --port 30000
+```
+
+### 2. Run benchmark with profiling
+To profile the server performance, add the `--profile` flag:
+Then run benchmark with `--dataset-path`:
+```bash
+export PYTHONPATH=/path/to/sglang/python
 
 python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
     --backend sglang-image \
     --task ti2i \
+    --port 30000 \
     --dataset vbench \
-    --num-prompts ${num_prompts} \
-    --width ${width} \
-    --height ${height} \
-    --port ${port} \
+    --dataset-path /home/yajizhan/dev/benchmark_data \
+    --num-prompts 5 \
+    --max-concurrency 1 \
+    --width 768 \
+    --height 1024 \
+    --num-inference-steps 8 \
+    --guidance-scale 1 \
+    --profile
+```
+
+### 3. View trace files
+
+After profiling, trace files are saved to `SGLANG_TORCH_PROFILER_DIR`:
 
 ```
+./sglang_qwen_profiling/
+├── 1736694000-host.trace.json.gz     # HTTP server process
+├── 1736694000-rank-0.trace.json.gz   # GPU worker rank 0
+└── 1736694000-rank-1.trace.json.gz   # GPU worker rank 1
+```
+
+Open these files in [Perfetto UI](https://ui.perfetto.dev/) or Chrome's `chrome://tracing` to visualize the performance.
+
 # Evaluation (WIP)
