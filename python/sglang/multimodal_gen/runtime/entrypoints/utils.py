@@ -69,6 +69,24 @@ class ShutdownReq:
     pass
 
 
+@dataclass
+class StartProfileReq:
+    """Request to start profiling in the worker process."""
+
+    output_dir: Optional[str] = None
+    profile_id: Optional[str] = None
+    activities: Optional[List[str]] = None
+    with_stack: Optional[bool] = None
+    record_shapes: Optional[bool] = None
+
+
+@dataclass
+class StopProfileReq:
+    """Request to stop profiling in the worker process."""
+
+    export_trace: bool = True
+
+
 def format_lora_message(
     lora_nickname: Union[str, List[str]],
     target: Union[str, List[str]],

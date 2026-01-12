@@ -17,6 +17,8 @@ from sglang.multimodal_gen.runtime.entrypoints.utils import (
     MergeLoraWeightsReq,
     SetLoraReq,
     ShutdownReq,
+    StartProfileReq,
+    StopProfileReq,
     UnmergeLoraWeightsReq,
     format_lora_message,
     save_outputs,
@@ -37,6 +39,8 @@ __all__ = [
     "UnmergeLoraWeightsReq",
     "ListLorasReq",
     "ShutdownReq",
+    "StartProfileReq",
+    "StopProfileReq",
     "format_lora_message",
 ]
 
