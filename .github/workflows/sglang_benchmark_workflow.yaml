@@ -163,6 +163,18 @@ jobs:
             exit 1
           fi
 
+      - name: Run performance benchmark
+        continue-on-error: true
+        timeout-minutes: 60
+        run: |
+          model_name=${{ matrix.model }}
+          if [ "$model_name" == "Qwen3-Omni" ]; then
+            docker exec sglang_test bash -c "scripts/ci/sglang_benchmark_workflow.sh performance $model_name /models/Qwen/Qwen3-Omni-30B-A3B-Instruct/ 4 1"
+          else
+            echo "Skip performance benchmark for model_name: ${model_name}"
+            exit 0
+          fi
+
       - name: Clean Up
         if: always()
         run:

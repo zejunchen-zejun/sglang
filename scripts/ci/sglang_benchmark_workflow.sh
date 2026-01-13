@@ -211,16 +211,26 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
 elif [[ "${TYPE}" == "performance" ]]; then
     echo
     echo "========== STARTING PERFORMANCE BENCHMARK =========="
-    python3 -m sglang.bench_serving \
-        --backend sglang-oai-chat \
-        --dataset-name image \
-        --image-count 1 \
-        --image-resolution 800x800 \
-        --random-input-len 1000 \
-        --random-output-len 2000 \
-        --max-concurrency 64 \
-        --num-prompts 192 \
-        | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
+    if [[ "${model_name}" == "Qwen3-Omni" ]]; then
+        python3 -m sglang.bench_serving \
+            --backend sglang-oai-chat \
+            --host localhost \
+            --port 9000 \
+            --model "${model_path}" \
+            --dataset-name image \
+            --image-count 10 \
+            --image-resolution 960x1280 \
+            --random-input-len 8000 \
+            --random-output-len 500 \
+            --max-concurrency 1 \
+            --num-prompts 128 \
+            --flush-cache \
+            --skip-special-tokens \
+            2>&1 | tee performance_benchmark_${model_name}_TP${TP}_EP${EP}.log
+    else
+        echo "Unknown model_name: ${model_name}"
+        exit 1
+    fi
 
 else
     echo "Unknown TYPE: ${TYPE}"
