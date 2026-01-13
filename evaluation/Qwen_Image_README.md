@@ -164,7 +164,7 @@ export SGLANG_TORCH_PROFILER_DIR=./sglang_qwen_profiling
 export SGLANG_PROFILE_WITH_STACK=1
 export SGLANG_PROFILE_RECORD_SHAPES=1
 export CUDA_VISIBLE_DEVICES=0,1
-export SGLANG_CACHE_DIT_ENABLED=true
+export SGLANG_CACHE_DIT_ENABLED=false
 
 sglang serve \
     --model-path /mnt/raid0/pretrained_model/Qwen-Image-Edit \
@@ -174,7 +174,8 @@ sglang serve \
     --image-encoder-precision bf16 \
     --vae-precision bf16 \
     --host 0.0.0.0 \
-    --port 30000
+    --port 30000 \
+    --enable-torch-compile
 ```
 
 ### 2. Run benchmark with profiling
