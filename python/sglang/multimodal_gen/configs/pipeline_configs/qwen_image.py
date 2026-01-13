@@ -196,16 +196,6 @@ class QwenImagePipelineConfig(ImagePipelineConfig):
         ] * batch_size
         txt_seq_lens = [prompt_embeds[0].shape[1]]
 
-        # freqs_cis = self.get_freqs_cis(
-        #     img_shapes, txt_seq_lens, rotary_emb, device, dtype
-        # )
-
-        # img_cache, txt_cache = freqs_cis
-        # img_cache = shard_rotary_emb_for_sp(img_cache)
-        # return {
-        #     "txt_seq_lens": txt_seq_lens,
-        #     "freqs_cis": (img_cache, txt_cache),
-        # }
         (img_cos, img_sin), (txt_cos, txt_sin) = self.get_freqs_cis(
             img_shapes, txt_seq_lens, rotary_emb, device, dtype
         )
@@ -274,35 +264,22 @@ class QwenImageEditPipelineConfig(QwenImagePipelineConfig):
             ],
         ] * batch_size
         txt_seq_lens = [prompt_embeds[0].shape[1]]
-        # freqs_cis = QwenImagePipelineConfig.get_freqs_cis(
         (img_cos, img_sin), (txt_cos, txt_sin) = QwenImagePipelineConfig.get_freqs_cis(
             img_shapes, txt_seq_lens, rotary_emb, device, dtype
         )
 
-        # perform sp shard on noisy image tokens
         noisy_img_seq_len = (
             1 * (height // vae_scale_factor // 2) * (width // vae_scale_factor // 2)
         )
 
-        # img_cache, txt_cache = freqs_cis
-        # noisy_img_cache = shard_rotary_emb_for_sp(img_cache[:noisy_img_seq_len, :])
-        # img_cache = torch.cat(
-        #     [noisy_img_cache, img_cache[noisy_img_seq_len:, :]], dim=0
-        # ).to(device=device)
-        # return {
-        #     "txt_seq_lens": txt_seq_lens,
-        #     "freqs_cis": (img_cache, txt_cache),
-        # }
         noisy_img_cos = shard_rotary_emb_for_sp(img_cos[:noisy_img_seq_len, :])
         noisy_img_sin = shard_rotary_emb_for_sp(img_sin[:noisy_img_seq_len, :])
 
-        # concat back the img_cos for input image (since it is not sp-shared later)
-        img_cos = torch.cat([noisy_img_cos, img_cos[noisy_img_seq_len:, :]], dim=0).to(
-            device=device
-        )
-        img_sin = torch.cat([noisy_img_sin, img_sin[noisy_img_seq_len:, :]], dim=0).to(
-            device=device
-        )
+        cond_img_cos = shard_rotary_emb_for_sp(img_cos[noisy_img_seq_len:, :])
+        cond_img_sin = shard_rotary_emb_for_sp(img_sin[noisy_img_seq_len:, :])
+
+        img_cos = torch.cat([noisy_img_cos, cond_img_cos], dim=0).to(device=device)
+        img_sin = torch.cat([noisy_img_sin, cond_img_sin], dim=0).to(device=device)
 
         return {
             "txt_seq_lens": txt_seq_lens,
@@ -481,34 +458,18 @@ class QwenImageEditPlusPipelineConfig(QwenImageEditPipelineConfig):
             )
         )
 
-        # perform sp shard on noisy image tokens
         noisy_img_seq_len = (
             1 * (height // vae_scale_factor // 2) * (width // vae_scale_factor // 2)
         )
 
-        # if isinstance(freqs_cis[0], torch.Tensor) and freqs_cis[0].dim() == 2:
-        #     img_cache, txt_cache = freqs_cis
-        #     noisy_img_cache = shard_rotary_emb_for_sp(img_cache[:noisy_img_seq_len, :])
-        #     img_cache = torch.cat(
-        #         [noisy_img_cache, img_cache[noisy_img_seq_len:, :]], dim=0
-        #     ).to(device=device)
-        #     return {
-        #         "txt_seq_lens": txt_seq_lens,
-        #         "freqs_cis": (img_cache, txt_cache),
-        #         "img_shapes": img_shapes,
-        #     }
-
-        # (img_cos, img_sin), (txt_cos, txt_sin) = freqs_cis
         noisy_img_cos = shard_rotary_emb_for_sp(img_cos[:noisy_img_seq_len, :])
         noisy_img_sin = shard_rotary_emb_for_sp(img_sin[:noisy_img_seq_len, :])
 
-        # concat back the img_cos for input image (since it is not sp-shared later)
-        img_cos = torch.cat([noisy_img_cos, img_cos[noisy_img_seq_len:, :]], dim=0).to(
-            device=device
-        )
-        img_sin = torch.cat([noisy_img_sin, img_sin[noisy_img_seq_len:, :]], dim=0).to(
-            device=device
-        )
+        cond_img_cos = shard_rotary_emb_for_sp(img_cos[noisy_img_seq_len:, :])
+        cond_img_sin = shard_rotary_emb_for_sp(img_sin[noisy_img_seq_len:, :])
+
+        img_cos = torch.cat([noisy_img_cos, cond_img_cos], dim=0).to(device=device)
+        img_sin = torch.cat([noisy_img_sin, cond_img_sin], dim=0).to(device=device)
 
         return {
             "txt_seq_lens": txt_seq_lens,
@@ -545,16 +506,16 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
             img_shapes, txt_seq_lens, rotary_emb, device, dtype
         )
 
-        # perform sp shard on noisy image tokens
         noisy_img_seq_len = (
             1 * (height // vae_scale_factor // 2) * (width // vae_scale_factor // 2)
         )
 
         img_cache, txt_cache = freqs_cis
         noisy_img_cache = shard_rotary_emb_for_sp(img_cache[:noisy_img_seq_len, :])
-        img_cache = torch.cat(
-            [noisy_img_cache, img_cache[noisy_img_seq_len:, :]], dim=0
-        ).to(device=device)
+
+        cond_img_cache = shard_rotary_emb_for_sp(img_cache[noisy_img_seq_len:, :])
+
+        img_cache = torch.cat([noisy_img_cache, cond_img_cache], dim=0).to(device=device)
 
         return {
             "txt_seq_lens": txt_seq_lens,
