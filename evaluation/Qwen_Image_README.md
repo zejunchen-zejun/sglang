@@ -187,7 +187,8 @@ sglang serve \
     --vae-precision bf16 \
     --host 0.0.0.0 \
     --port 30000 \
-    --enable-torch-compile
+    --enable-torch-compile \
+    --seed 42
 ```
 
 ### 2. Run benchmark with profiling

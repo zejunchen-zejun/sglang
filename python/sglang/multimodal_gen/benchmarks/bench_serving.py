@@ -62,6 +62,7 @@ class RequestFuncInput:
     fps: Optional[int] = None
     num_inference_steps: Optional[int] = None
     guidance_scale: Optional[float] = None
+    seed: Optional[int] = None
     extra_body: Dict[str, Any] = field(default_factory=dict)
     image_paths: Optional[List[str]] = None
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -319,6 +320,7 @@ class VBenchDataset(BaseDataset):
             fps=self.args.fps,
             num_inference_steps=getattr(self.args, "num_inference_steps", None),
             guidance_scale=getattr(self.args, "guidance_scale", None),
+            seed=getattr(self.args, "seed", None),
             image_paths=image_paths,
         )
 
@@ -345,6 +347,9 @@ class RandomDataset(BaseDataset):
             height=self.args.height,
             num_frames=self.args.num_frames,
             fps=self.args.fps,
+            num_inference_steps=getattr(self.args, "num_inference_steps", None),
+            guidance_scale=getattr(self.args, "guidance_scale", None),
+            seed=getattr(self.args, "seed", None),
         )
 
     def get_requests(self) -> List[RequestFuncInput]:
@@ -375,6 +380,8 @@ async def async_request_image_sglang(
             data.add_field("num_inference_steps", str(input.num_inference_steps))
         if input.guidance_scale is not None:
             data.add_field("guidance_scale", str(input.guidance_scale))
+        if input.seed is not None:
+            data.add_field("seed", str(input.seed))
 
         # Add profiling parameter if set
         if input.extra_body.get("profile"):
@@ -432,6 +439,8 @@ async def async_request_image_sglang(
             payload["num_inference_steps"] = input.num_inference_steps
         if input.guidance_scale is not None:
             payload["guidance_scale"] = input.guidance_scale
+        if input.seed is not None:
+            payload["seed"] = input.seed
 
         # Merge extra parameters
         payload.update(input.extra_body)
@@ -945,6 +954,12 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Classifier-free guidance scale (default: model default, e.g., 4.0 for QwenImage).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for generation (default: 1024). Use the same seed for reproducible results.",
     )
     parser.add_argument(
         "--output-file", type=str, default=None, help="Output JSON file for metrics."
