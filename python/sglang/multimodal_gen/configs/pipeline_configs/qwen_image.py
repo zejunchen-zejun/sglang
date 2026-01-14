@@ -194,6 +194,8 @@ class QwenImagePipelineConfig(ImagePipelineConfig):
                 )
             ]
         ] * batch_size
+
+        # Use original txt seq len (before SP sharding) for RoPE generation
         original_txt_seq_len = getattr(batch, "original_txt_seq_len", None)
         if original_txt_seq_len is not None:
             txt_seq_lens = [original_txt_seq_len]
@@ -277,6 +279,8 @@ class QwenImageEditPipelineConfig(QwenImagePipelineConfig):
                 ),
             ],
         ] * batch_size
+
+        # Use original txt seq len (before SP sharding) for RoPE generation
         original_txt_seq_len = getattr(batch, "original_txt_seq_len", None)
         if original_txt_seq_len is not None:
             txt_seq_lens = [original_txt_seq_len]
@@ -289,7 +293,6 @@ class QwenImageEditPipelineConfig(QwenImagePipelineConfig):
                 "txt_seq_lens": txt_seq_lens,
                 "freqs_cis": None,
             }
-
         (img_cos, img_sin), (txt_cos, txt_sin) = QwenImagePipelineConfig.get_freqs_cis(
             img_shapes, txt_seq_lens, rotary_emb, device, dtype
         )
@@ -477,11 +480,20 @@ class QwenImageEditPlusPipelineConfig(QwenImageEditPipelineConfig):
                 ],
             ],
         ] * batch_size
+
+        # Use original txt seq len (before SP sharding) for RoPE generation
         original_txt_seq_len = getattr(batch, "original_txt_seq_len", None)
         if original_txt_seq_len is not None:
             txt_seq_lens = [original_txt_seq_len]
         else:
             txt_seq_lens = [prompt_embeds[0].shape[1]]
+
+        if rotary_emb is None:
+            return {
+                "img_shapes": img_shapes,
+                "txt_seq_lens": txt_seq_lens,
+                "freqs_cis": None,
+            }
 
         (img_cos, img_sin), (txt_cos, txt_sin) = (
             QwenImageEditPlusPipelineConfig.get_freqs_cis(
@@ -534,6 +546,16 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
 
         img_shapes = batch.img_shapes
         txt_seq_lens = batch.txt_seq_lens
+
+        if rotary_emb is None:
+            return {
+                "txt_seq_lens": txt_seq_lens,
+                "img_shapes": img_shapes,
+                "freqs_cis": None,
+                "additional_t_cond": torch.tensor(
+                    [0], device=device, dtype=torch.long
+                ),
+            }
 
         (img_cos, img_sin), (txt_cos, txt_sin) = (
             QwenImageEditPlusPipelineConfig.get_freqs_cis(
