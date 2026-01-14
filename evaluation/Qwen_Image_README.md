@@ -10,7 +10,19 @@
    rocm/sgl-dev:v0.5.7-rocm700-mi35x-20260106
    ```
 
-2. Install zejun/sglang dev/perf branch:
+2. Install aiter dev/perf branch:
+   ```
+   pip uninstall aiter
+   git clone -b dev/perf git@github.com:ROCm/aiter.git
+   cd aiter
+   git submodule sync && git submodule update --init --recursive
+   # for MI308
+   GPU_ARCHS=gfx942 python3 setup.py install
+   # for MI355
+   GPU_ARCHS=gfx950 python3 setup.py install
+   ```
+
+3. Install zejun/sglang dev/perf branch:
    ```
    git clone -b Qwen-Image https://github.com/zejunchen-zejun/sglang.git
    cd sglang
@@ -19,7 +31,7 @@
    python3 setup_rocm.py install
    export PYTHONPATH=<you_sglang_path/sglang/python>
    ```
-3. Other requirements:
+4. Other requirements:
     ```
    pip install remote_pdb
    pip install imageio
