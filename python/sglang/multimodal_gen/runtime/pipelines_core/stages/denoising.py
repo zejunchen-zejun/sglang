@@ -772,6 +772,8 @@ class DenoisingStage(PipelineStage):
             )
 
         if batch.prompt_embeds is not None:
+            # Save original txt seq len before sharding for RoPE generation
+            batch.original_txt_seq_len = batch.prompt_embeds[0].shape[1]
             batch.prompt_embeds = self._shard_text_embeds_for_sp(
                 batch.prompt_embeds, sp_world_size, rank
             )
