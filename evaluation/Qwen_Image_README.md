@@ -187,8 +187,7 @@ sglang serve \
     --vae-precision bf16 \
     --host 0.0.0.0 \
     --port 30000 \
-    --enable-torch-compile \
-    --seed 42
+    --enable-torch-compile
 ```
 
 ### 2. Run benchmark with profiling
@@ -209,6 +208,7 @@ python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
     --height 1024 \
     --num-inference-steps 8 \
     --guidance-scale 1 \
+    --seed 42 \
     --profile
 ```
 
