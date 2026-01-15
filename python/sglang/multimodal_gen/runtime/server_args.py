@@ -874,7 +874,9 @@ class ServerArgs:
             if self.enable_cfg_parallel:
                 num_gpus_per_group *= 2
             if self.num_gpus % num_gpus_per_group != 0:
-                raise ValueError(f"{self.num_gpus=} % {num_gpus_per_group} != 0")
+                raise ValueError(
+                    f"num_gpus={self.num_gpus} % {num_gpus_per_group} != 0"
+                )
             self.sp_degree = self.num_gpus // num_gpus_per_group
 
         if (
@@ -923,7 +925,9 @@ class ServerArgs:
             )
 
     def check_server_dp_args(self):
-        assert self.num_gpus % self.dp_size == 0, f"{self.num_gpus=}, {self.dp_size=}"
+        assert (
+            self.num_gpus % self.dp_size == 0
+        ), f"num_gpus={self.num_gpus}, dp_size={self.dp_size}"
         assert self.dp_size >= 1, "--dp-size must be natural number"
         # NOTE: disable temporarily
         # self.dp_degree = self.num_gpus // self.dp_size
@@ -946,9 +950,9 @@ class ServerArgs:
                 and current_platform.enable_dit_layerwise_offload_for_wan_by_default()
             ):
                 logger.info(
-                    "Automatically enable dit_layerwise_offload for Wan for best performance"
+                    "Automatically enable dit_layerwise_offload for Wan for best performance: %s",
+                    self.dit_layerwise_offload,
                 )
-                self.dit_layerwise_offload = True
 
         if self.dit_layerwise_offload:
             if self.use_fsdp_inference:
