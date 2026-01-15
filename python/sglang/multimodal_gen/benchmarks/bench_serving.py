@@ -213,11 +213,20 @@ class VBenchDataset(BaseDataset):
 
         data = []
         for item in items:
-            img_path = os.path.join(origin_dir, item.get("file_name", ""))
-            if os.path.exists(img_path):
-                data.append({"prompt": item.get("caption", ""), "image_path": img_path})
+            file_name = item.get("file_name", "")
+            image_paths = [
+                os.path.join(origin_dir, fname) 
+                for fname in (file_name if isinstance(file_name, list) else [file_name])
+                if os.path.exists(os.path.join(origin_dir, fname))
+            ]
+            
+            if image_paths:
+                data.append({
+                    "prompt": item.get("caption", ""),
+                    "image_path": image_paths
+                })
             else:
-                print(f"Warning: Image not found: {img_path}")
+                print(f"Warning: Image not found: {image_paths}")
 
         print(f"Loaded {len(data)} I2V samples from VBench I2V dataset")
         return data
@@ -308,7 +317,14 @@ class VBenchDataset(BaseDataset):
 
     def __getitem__(self, idx: int) -> RequestFuncInput:
         item = self.items[idx]
-        image_paths = [item["image_path"]] if "image_path" in item else None
+        if "image_path" in item:
+            if isinstance(item["image_path"], list):
+                image_paths = item["image_path"]
+            else:
+                image_paths = [item["image_path"]]
+        else:
+            image_paths = None
+
 
         return RequestFuncInput(
             prompt=item.get("prompt", ""),
