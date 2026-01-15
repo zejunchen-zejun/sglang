@@ -366,10 +366,14 @@ class ServerArgs:
             if self.vae_cpu_offload is None:
                 self.vae_cpu_offload = False
         else:
-            self.dit_cpu_offload = True
-            self.text_encoder_cpu_offload = True
-            self.image_encoder_cpu_offload = True
-            self.vae_cpu_offload = True
+            if self.dit_cpu_offload is None:
+                self.dit_cpu_offload = True
+            if self.text_encoder_cpu_offload is None:
+                self.text_encoder_cpu_offload = True
+            if self.image_encoder_cpu_offload is None:
+                self.image_encoder_cpu_offload = True
+            if self.vae_cpu_offload is None:
+                self.vae_cpu_offload = True
 
     def __post_init__(self):
         # configure logger before use
@@ -865,7 +869,9 @@ class ServerArgs:
             if self.enable_cfg_parallel:
                 num_gpus_per_group *= 2
             if self.num_gpus % num_gpus_per_group != 0:
-                raise ValueError(f"{self.num_gpus=} % {num_gpus_per_group} != 0")
+                raise ValueError(
+                    f"num_gpus={self.num_gpus} % {num_gpus_per_group} != 0"
+                )
             self.sp_degree = self.num_gpus // num_gpus_per_group
 
         if (
@@ -914,7 +920,9 @@ class ServerArgs:
             )
 
     def check_server_dp_args(self):
-        assert self.num_gpus % self.dp_size == 0, f"{self.num_gpus=}, {self.dp_size=}"
+        assert (
+            self.num_gpus % self.dp_size == 0
+        ), f"num_gpus={self.num_gpus}, dp_size={self.dp_size}"
         assert self.dp_size >= 1, "--dp-size must be natural number"
         # NOTE: disable temporarily
         # self.dp_degree = self.num_gpus // self.dp_size
@@ -932,10 +940,11 @@ class ServerArgs:
         if not envs.SGLANG_CACHE_DIT_ENABLED:
             # TODO: need a better way to tell this
             if "wan" in self.pipeline_config.__class__.__name__.lower():
+                self.dit_layerwise_offload = False
                 logger.info(
-                    "Automatically enable dit_layerwise_offload for Wan for best performance"
+                    "Automatically enable dit_layerwise_offload for Wan for best performance: %s",
+                    self.dit_layerwise_offload,
                 )
-                self.dit_layerwise_offload = True
 
         if self.dit_layerwise_offload:
             if self.use_fsdp_inference:
