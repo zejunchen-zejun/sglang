@@ -228,6 +228,26 @@ python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
     --guidance-scale 1 \
     --profile
 ```
+If two images are used, guidance-scale needs to be set to 4.0.
+```bash
+export PYTHONPATH=/path/to/sglang/python
+
+python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
+    --backend sglang-image \
+    --task ti2i \
+    --port 30000 \
+    --dataset vbench \
+    --dataset-path /home/yajizhan/dev/benchmark_data \
+    --num-prompts 5 \
+    --max-concurrency 1 \
+    --width 768 \
+    --height 1024 \
+    --num-inference-steps 8 \
+    --guidance-scale 4 \
+    --profile
+```
+
+
 
 ### 3. View trace files
 
