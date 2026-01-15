@@ -133,6 +133,7 @@ sglang generate "${SERVER_ARGS[@]}" "${SAMPLING_ARGS[@]}"
 # Online Server
 
 ## Custom Dataset
+### Single picture
 Download picture form https://github.com/modelscope/DiffSynth-Engine/blob/dev/qz/qwen_app_amd/examples/input/768x1024.png
 To create a custom dataset for benchmarking, follow this structure:
 
@@ -155,6 +156,35 @@ Example `i2v-bench-info.json`:
     {"file_name": "768x1024.png", "caption": "make the clothes to red"}
 ]
 ```
+### Two picture
+Download picture
+```
+wget -O qwen_image_edit_input_01.png "https://primus-biz-data.oss-cn-wulanchabu.aliyuncs.com/laap%2Fcomfyui%2Fmodels%2Floras%2FKK%2F%E8%BE%93%E5%85%A5%E5%9B%BE%E5%83%8F%2F%E4%B8%8A%E4%BC%A0oss%2F%E5%8F%8C%E5%9B%BE%2F2026-01-06%2Frow_3_col_2.png?OSSAccessKeyId=LTAI5t7WDZ1dYGN4JULN8KX9&Expires=1783245266&Signature=ECmLp430FN9qAK3iivG4n7I%2BTo8%3D"
+wget -O qwen_image_edit_input_02.png "https://primus-biz-data.oss-cn-wulanchabu.aliyuncs.com/laap%2Fcomfyui%2Fmodels%2Floras%2FKK%2F%E8%BE%93%E5%85%A5%E5%9B%BE%E5%83%8F%2F%E4%B8%8A%E4%BC%A0oss%2F%E5%8F%8C%E5%9B%BE%2F2026-01-06%2Frow_3_col_3.png?OSSAccessKeyId=LTAI5t7WDZ1dYGN4JULN8KX9&Expires=1783245242&Signature=l7bLiGwW9IBqbwCgBx6W5QdXFzQ%3D"
+```
+To create a custom dataset for benchmarking, follow this structure:
+
+```
+/home/yajizhan/dev/benchmark_data/
+├── data/
+│   ├── i2v-bench-info.json
+│   └── origin/
+│       ├── qwen_image_edit_input_01.png
+│       └── qwen_image_edit_input_02.png
+```
+
+Example `i2v-bench-info.json`:
+
+```json
+[
+    {"file_name": ["qwen_image_edit_input_01.png","qwen_image_edit_input_02.png"], "caption": "将两个人合成一张合影，让他们并肩站立，面带微笑，背景为山景，保持自然的光线和透视关系。"},
+    {"file_name": ["qwen_image_edit_input_01.png","qwen_image_edit_input_02.png"], "caption": "将两个人合成一张合影，让他们并肩站立，面带微笑，背景为山景，保持自然的光线和透视关系。"},
+    {"file_name": ["qwen_image_edit_input_01.png","qwen_image_edit_input_02.png"], "caption": "将两个人合成一张合影，让他们并肩站立，面带微笑，背景为山景，保持自然的光线和透视关系。"},
+    {"file_name": ["qwen_image_edit_input_01.png","qwen_image_edit_input_02.png"], "caption": "将两个人合成一张合影，让他们并肩站立，面带微笑，背景为山景，保持自然的光线和透视关系。"},
+    {"file_name": ["qwen_image_edit_input_01.png","qwen_image_edit_input_02.png"], "caption": "将两个人合成一张合影，让他们并肩站立，面带微笑，背景为山景，保持自然的光线和透视关系。"}
+]
+```
+
 
 ### 1. Start the server with profiling environment
 
