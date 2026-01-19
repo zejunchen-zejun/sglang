@@ -12,7 +12,7 @@ from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend i
     AttentionMetadataBuilder,
 )
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
-from sglang.srt.utils import get_bool_env_var
+from sglang.srt.environ import envs
 
 
 class AITerBackend(AttentionBackend):
@@ -84,7 +84,7 @@ class AITerImpl(AttentionImpl):
         # which is what ring_attn provides.
 
         # 0: rtne, 1: rtna, 2: rtz
-        if get_bool_env_var("SGLANG_USE_AITER_FA_ROUND_MODE", default=False):
+        if envs.SGLANG_USE_AITER_FA_ROUND_MODE.get() == True:
             # use Aiter FA round mode
             how_v3_bf16_cvt = 2
         else:
