@@ -8,7 +8,6 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sgl_kernel import fused_add_rmsnorm, rmsnorm
 
 from sglang.jit_kernel.norm import can_use_fused_inplace_qknorm, fused_inplace_qknorm
 from sglang.multimodal_gen.runtime.layers.custom_op import CustomOp
@@ -17,7 +16,22 @@ from sglang.multimodal_gen.runtime.layers.triton_ops import (
     norm_infer,
     rms_norm_fn,
 )
+from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.common import get_bool_env_var
+
+# Platform detection
+_is_hip = current_platform.is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+
+# Import optimized kernels based on platform
+if current_platform.is_cuda():
+    from sgl_kernel import fused_add_rmsnorm, rmsnorm
+
+_has_vllm_hip_ops = False
+
+if _use_aiter:
+    from aiter import rmsnorm2d_fwd as aiter_rms_norm
+    from aiter import rmsnorm2d_fwd_with_add as aiter_fused_add_rms_norm
 
 
 # Copied and adapted from sglang
@@ -126,7 +140,27 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # ROCm builds of sgl-kernel do not expose rmsnorm custom ops yet.
+        """Forward for AMD ROCm (HIP) platform."""
+        if _use_aiter:
+            # aiter rmsnorm2d expects 2D tensor (batch, hidden_size)
+            shape = x.shape
+            x = x.reshape(-1, shape[-1])
+            if residual is not None:
+                residual = residual.reshape(-1, shape[-1])
+                residual_out = torch.empty_like(x)
+                output = torch.empty_like(x)
+                aiter_fused_add_rms_norm(
+                    output,
+                    x,
+                    residual,
+                    residual_out,
+                    self.weight.data,
+                    self.variance_epsilon,
+                )
+                return output.view(shape), residual_out.view(shape)
+            out = aiter_rms_norm(x, self.weight.data, self.variance_epsilon)
+            return out.view(shape)
+
         return self.forward_native(x, residual)
 
     def extra_repr(self) -> str:
