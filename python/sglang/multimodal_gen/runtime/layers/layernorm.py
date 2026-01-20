@@ -6,6 +6,7 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch._dynamo
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -27,8 +28,7 @@ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 if current_platform.is_cuda():
     from sgl_kernel import fused_add_rmsnorm, rmsnorm
 
-_has_vllm_hip_ops = False
-
+# Import aiter kernels if available
 if _use_aiter:
     from aiter import rmsnorm2d_fwd as aiter_rms_norm
     from aiter import rmsnorm2d_fwd_with_add as aiter_fused_add_rms_norm
@@ -141,8 +141,16 @@ class RMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward for AMD ROCm (HIP) platform."""
+        # Use triton when torch.compile is tracing (aiter kernels are not compatible)
+        if torch._dynamo.is_compiling():
+            return self.forward_native(x, residual)
+        # Use aiter kernels when not compiling
         if _use_aiter:
-            # aiter rmsnorm2d expects 2D tensor (batch, hidden_size)
+            if not x.is_contiguous():
+                x = x.contiguous()
+            if residual is not None and not residual.is_contiguous():
+                residual = residual.contiguous()
+
             shape = x.shape
             x = x.reshape(-1, shape[-1])
             if residual is not None:
