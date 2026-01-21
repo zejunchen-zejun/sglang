@@ -1,11 +1,11 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
+from functools import lru_cache
 from transformers import (
     Cache,
     DynamicCache,
     PretrainedConfig,
     Qwen2_5_VLTextConfig,
-    Qwen2RMSNorm,
 )
 from transformers.masking_utils import (
     create_causal_mask,
@@ -17,6 +17,7 @@ from transformers.utils import TransformersKwargs, is_torchdynamo_compiling
 
 from sglang.multimodal_gen.configs.models.encoders.qwen_image import Qwen2_5VLConfig
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention
+from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
 from sglang.multimodal_gen.runtime.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
@@ -62,19 +63,194 @@ except ImportError:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2_5_VisionTransformerPretrainedModel,
+    Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VLAttention,
     Qwen2_5_VLCausalLMOutputWithPast,
     Qwen2_5_VLModelOutputWithPast,
     Qwen2_5_VLRotaryEmbedding,
+    Qwen2_5_VLVisionBlock,
+    Qwen2_5_VLPatchMerger,
     Qwen2MLP,
+    apply_rotary_pos_emb_vision,
     apply_multimodal_rotary_pos_emb,
     eager_attention_forward,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ============== Vision Attention Wrappers ==============
+# These wrappers provide a unified interface for different attention backends
+# and help avoid graph breaks in torch.compile
+
+
+def vit_flash_attn_varlen(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    max_seqlen: int,
+    dropout_p: float = 0.0,
+    causal: bool = False,
+) -> torch.Tensor:
+    """
+    FlashAttention variable-length wrapper for ViT.
+    
+    Args:
+        query: [total_seq_len, num_heads, head_dim]
+        key: [total_seq_len, num_heads, head_dim]
+        value: [total_seq_len, num_heads, head_dim]
+        cu_seqlens: [batch_size + 1] cumulative sequence lengths
+        max_seqlen: maximum sequence length in the batch
+        dropout_p: dropout probability
+        causal: whether to use causal attention
+    
+    Returns:
+        output: [total_seq_len, num_heads, head_dim]
+    """
+    try:
+        from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        raise ImportError("flash_attn is required for FlashAttention backend")
+    
+    output = flash_attn_varlen_func(
+        query,
+        key,
+        value,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=max_seqlen,
+        max_seqlen_k=max_seqlen,
+        dropout_p=dropout_p,
+        causal=causal,
+    )
+    return output
+
+
+def vit_sdpa_varlen(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    dropout_p: float = 0.0,
+) -> torch.Tensor:
+    """
+    PyTorch SDPA wrapper for ViT with variable-length sequences.
+    
+    Args:
+        query: [1, num_heads, total_seq_len, head_dim]
+        key: [1, num_heads, total_seq_len, head_dim]
+        value: [1, num_heads, total_seq_len, head_dim]
+        cu_seqlens: [batch_size + 1] cumulative sequence lengths
+        dropout_p: dropout probability
+    
+    Returns:
+        output: [1, num_heads, total_seq_len, head_dim]
+    """
+    # Process each sequence segment separately
+    outputs = []
+    for i in range(len(cu_seqlens) - 1):
+        start_idx = cu_seqlens[i].item()
+        end_idx = cu_seqlens[i + 1].item()
+        
+        q_i = query[:, :, start_idx:end_idx, :]
+        k_i = key[:, :, start_idx:end_idx, :]
+        v_i = value[:, :, start_idx:end_idx, :]
+        
+        output_i = F.scaled_dot_product_attention(
+            q_i, k_i, v_i, dropout_p=dropout_p, is_causal=False
+        )
+        outputs.append(output_i)
+    
+    return torch.cat(outputs, dim=2)
+
+
+def vit_attention_forward(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    max_seqlen: Optional[int] = None,
+    attn_backend: str = "flash_attention_2",
+    scaling: float = 1.0,
+    dropout_p: float = 0.0,
+) -> torch.Tensor:
+    """
+    Unified attention forward for ViT.
+    
+    Args:
+        query: [seq_len, num_heads, head_dim]
+        key: [seq_len, num_heads, head_dim]
+        value: [seq_len, num_heads, head_dim]
+        cu_seqlens: cumulative sequence lengths
+        max_seqlen: maximum sequence length (required for flash_attn)
+        attn_backend: attention backend ("flash_attention_2", "sdpa", "eager")
+        scaling: attention scaling factor
+        dropout_p: dropout probability
+    
+    Returns:
+        output: [seq_len, hidden_dim]
+    """
+    seq_len, num_heads, head_dim = query.shape
+    
+    if attn_backend == "flash_attention_2":
+        if max_seqlen is None:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        
+        output = vit_flash_attn_varlen(
+            query, key, value,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            dropout_p=dropout_p,
+            causal=False,
+        )
+        # output shape: [seq_len, num_heads, head_dim]
+        output = output.reshape(seq_len, -1)
+        
+    elif attn_backend == "sdpa":
+        # Reshape for SDPA: [seq, heads, dim] -> [1, heads, seq, dim]
+        query = query.transpose(0, 1).unsqueeze(0)
+        key = key.transpose(0, 1).unsqueeze(0)
+        value = value.transpose(0, 1).unsqueeze(0)
+        
+        output = vit_sdpa_varlen(
+            query, key, value,
+            cu_seqlens=cu_seqlens,
+            dropout_p=dropout_p,
+        )
+        # Reshape back: [1, heads, seq, dim] -> [seq, hidden]
+        output = output.squeeze(0).transpose(0, 1).reshape(seq_len, -1)
+        
+    else:  # eager
+        # Reshape for manual attention: [seq, heads, dim] -> [1, heads, seq, dim]
+        query = query.transpose(0, 1).unsqueeze(0)
+        key = key.transpose(0, 1).unsqueeze(0)
+        value = value.transpose(0, 1).unsqueeze(0)
+        
+        # Process each sequence segment
+        split_indices = cu_seqlens[1:-1].to("cpu")
+        q_splits = torch.tensor_split(query, split_indices, dim=2)
+        k_splits = torch.tensor_split(key, split_indices, dim=2)
+        v_splits = torch.tensor_split(value, split_indices, dim=2)
+        
+        outputs = []
+        for q, k, v in zip(q_splits, k_splits, v_splits):
+            # Compute attention scores
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scaling
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            if dropout_p > 0:
+                attn_weights = F.dropout(attn_weights, p=dropout_p)
+            output_i = torch.matmul(attn_weights, v)
+            outputs.append(output_i)
+        
+        output = torch.cat(outputs, dim=2)
+        # Reshape back: [1, heads, seq, dim] -> [seq, hidden]
+        output = output.squeeze(0).transpose(0, 1).reshape(seq_len, -1)
+    
+    return output.contiguous()
 
 
 class Qwen2_5_VLAttention(nn.Module):
@@ -221,8 +397,9 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         self.self_attn = Qwen2_5_VLAttention(config, layer_idx)
 
         self.mlp = Qwen2MLP(config)
-        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen2RMSNorm(
+        # Use optimized RMSNorm with CUDA kernel support
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
         self.attention_type = config.layer_types[layer_idx]
@@ -344,7 +521,8 @@ class Qwen2_5_VLTextModel(nn.Module):
             ]
         )
         self._attn_implementation = config._attn_implementation
-        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # Use optimized RMSNorm with CUDA kernel support
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = Qwen2_5_VLRotaryEmbedding(config=config)
         self.has_sliding_layers = "sliding_attention" in self.config.layer_types
 
@@ -499,6 +677,468 @@ class Qwen2_5_VLTextModel(nn.Module):
         )
 
 
+class Qwen2_5_VLVisionAttention(nn.Module):
+    """
+    Vision attention module with unified attention backend support.
+    Supports FlashAttention2, SDPA, and eager backends.
+    """
+    
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.dim = config.hidden_size
+        self.num_heads = config.num_heads
+        self.head_dim = self.dim // self.num_heads
+        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
+        self.proj = nn.Linear(self.dim, self.dim)
+        self.scaling = self.head_dim**-0.5
+        self.config = config
+        self.attention_dropout = 0.0
+        
+        # Determine attention backend
+        self.attn_backend = getattr(config, "_attn_implementation", "flash_attention_2")
+        if self.attn_backend is None:
+            self.attn_backend = "flash_attention_2"
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        seq_length = hidden_states.shape[0]
+        
+        # QKV projection and reshape: [seq, dim] -> [seq, heads, head_dim]
+        query_states, key_states, value_states = (
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, self.head_dim)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
+        )
+        
+        # Apply rotary position embeddings
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb_vision(
+            query_states, key_states, cos, sin
+        )
+        
+        # Get max_seqlen from kwargs or compute
+        max_seqlen = kwargs.get("max_seqlen")
+        if max_seqlen is not None and isinstance(max_seqlen, torch.Tensor):
+            max_seqlen = max_seqlen.item()
+        
+        # Use unified attention forward
+        attn_output = vit_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            attn_backend=self.attn_backend,
+            scaling=self.scaling,
+            dropout_p=self.attention_dropout if self.training else 0.0,
+        )
+        
+        # Output projection
+        attn_output = self.proj(attn_output)
+        return attn_output
+
+
+class Qwen2_5_VLVisionBlock(nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+        # Use optimized RMSNorm with CUDA kernel support
+        self.norm1 = RMSNorm(config.hidden_size, eps=1e-6)
+        self.norm2 = RMSNorm(config.hidden_size, eps=1e-6)
+        self.attn = Qwen2_5_VLVisionAttention(config=config)
+        self.mlp = Qwen2_5_VLMLP(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=True,
+            hidden_act=config.hidden_act,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        hidden_states = hidden_states + self.attn(
+            self.norm1(hidden_states),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb=rotary_pos_emb,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        return hidden_states
+
+
+class VisionRotaryEmbeddingWithCache(nn.Module):
+    """
+    Vision Rotary Embedding with pre-computed cos/sin cache.
+    This avoids recomputing cos/sin for each forward pass.
+    Reference: vLLM rotary_embedding implementation.
+    """
+    
+    def __init__(self, dim: int, max_position: int = 8192, base: float = 10000.0):
+        super().__init__()
+        self.dim = dim
+        self.max_position = max_position
+        self.base = base
+        
+        # Pre-compute inverse frequencies
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        
+        # Pre-compute cos/sin cache
+        self._build_cache(max_position)
+    
+    def _build_cache(self, max_position: int):
+        """Build cos/sin cache for positions up to max_position."""
+        t = torch.arange(max_position, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)
+        # [max_position, dim]
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos_cache = emb.cos()
+        sin_cache = emb.sin()
+        self.register_buffer("cos_cache", cos_cache, persistent=False)
+        self.register_buffer("sin_cache", sin_cache, persistent=False)
+    
+    def get_cos_sin(self, max_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Get pre-computed cos/sin for positions up to max_size."""
+        if max_size > self.max_position:
+            # Extend cache if needed
+            self._build_cache(max_size)
+        return self.cos_cache[:max_size], self.sin_cache[:max_size]
+    
+    def forward(self, max_grid_size: int) -> torch.Tensor:
+        """Return full embedding for compatibility with HuggingFace interface."""
+        cos, sin = self.get_cos_sin(max_grid_size)
+        return cos
+
+
+def cast_overflow_tensors(x: torch.Tensor) -> torch.Tensor:
+    """
+    Cast tensors with overflow values (inf/nan) to prevent numerical issues.
+    This is especially important for float16 with long visual token sequences.
+    Reference: vLLM qwen2_5_vl.py
+    """
+    if x.dtype == torch.float16:
+        # Check for overflow values
+        clamp_value = torch.finfo(torch.float16).max - 1000
+        x = torch.clamp(x, min=-clamp_value, max=clamp_value)
+    return x
+
+
+class Qwen2_5_VisionTransformer(nn.Module):
+    """Qwen2.5-VL vision transformer with tensor-based window indexing."""
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.config = config
+        if getattr(self.config, "_attn_implementation", None) is None:
+            self.config._attn_implementation = "flash_attention_2"
+        self.spatial_merge_size = config.spatial_merge_size
+        self.patch_size = config.patch_size
+        self.fullatt_block_indexes = config.fullatt_block_indexes
+        self.window_size = config.window_size
+        self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
+
+        self.patch_embed = Qwen2_5_VisionPatchEmbed(
+            patch_size=config.patch_size,
+            temporal_patch_size=config.temporal_patch_size,
+            in_channels=config.in_channels,
+            embed_dim=config.hidden_size,
+        )
+
+        head_dim = config.hidden_size // config.num_heads
+        # Use cached rotary embedding for better performance
+        self.rotary_pos_emb = VisionRotaryEmbeddingWithCache(
+            dim=head_dim // 2,
+            max_position=8192,
+            base=10000.0,
+        )
+
+        self.blocks = nn.ModuleList(
+            [Qwen2_5_VLVisionBlock(config) for _ in range(config.depth)]
+        )
+        self.merger = Qwen2_5_VLPatchMerger(
+            dim=config.out_hidden_size,
+            context_dim=config.hidden_size,
+            spatial_merge_size=config.spatial_merge_size,
+        )
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.patch_embed.proj.weight.dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self.patch_embed.proj.weight.device
+
+    def rotary_pos_emb_thw(self, t: int, h: int, w: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute rotary position embeddings for a single (t, h, w) grid.
+        Uses pre-computed cos/sin cache for efficiency.
+        Reference: vLLM qwen2_5_vl.py
+        """
+        sms = self.spatial_merge_size
+        
+        # Create position IDs
+        hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+        wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+        
+        # Reshape according to spatial merge pattern
+        hpos_ids = (
+            hpos_ids.reshape(h // sms, sms, w // sms, sms)
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        wpos_ids = (
+            wpos_ids.reshape(h // sms, sms, w // sms, sms)
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        
+        pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
+        max_size = max(h, w)
+        
+        # Use pre-computed cos/sin cache
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max_size)
+        
+        cos_combined = cos[pos_ids].flatten(1)
+        sin_combined = sin[pos_ids].flatten(1)
+        
+        # Reshape for spatial merge unit
+        cos_combined = cos_combined.reshape(
+            cos_combined.shape[0] // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )
+        sin_combined = sin_combined.reshape(
+            sin_combined.shape[0] // self.spatial_merge_unit,
+            self.spatial_merge_unit,
+            -1,
+        )
+        
+        return cos_combined, sin_combined
+
+    @lru_cache(maxsize=1024)
+    def get_rope_by_thw(self, t: int, h: int, w: int):
+        """
+        Get cached rotary embeddings and window indices for a (t, h, w) grid.
+        Uses lru_cache to avoid recomputation for repeated grid sizes.
+        """
+        # Get window index
+        grid_thw = torch.tensor([[t, h, w]], dtype=torch.long)
+        window_index_thw, cu_window_seqlens_thw = self.get_window_index(grid_thw)
+        
+        # Get rotary embeddings using cached cos/sin
+        cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
+        
+        # Reorder according to window index
+        cos_thw = cos_thw[window_index_thw, :, :]
+        cos_thw = cos_thw.flatten(start_dim=0, end_dim=1)
+        sin_thw = sin_thw[window_index_thw, :, :]
+        sin_thw = sin_thw.flatten(start_dim=0, end_dim=1)
+        
+        position_embeddings = (cos_thw, sin_thw)
+
+        cu_seqlens_thw = torch.repeat_interleave(
+            torch.tensor([h * w], dtype=torch.int32), t
+        )
+
+        return (
+            position_embeddings,
+            window_index_thw,
+            cu_window_seqlens_thw,
+            cu_seqlens_thw,
+        )
+
+    def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor:
+        max_seqlen = torch.zeros([], device=cu_seqlens.device)
+        if getattr(self.config, "_attn_implementation", "eager") == "flash_attention_2":
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return max_seqlen
+
+    @staticmethod
+    def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
+        """Build inverse permutation in O(n) time with pin memory optimization."""
+        # Use pin memory for faster CPU-GPU transfer if available
+        try:
+            pin_memory = torch.cuda.is_available()
+        except Exception:
+            pin_memory = False
+        inv = torch.empty_like(perm, pin_memory=pin_memory)
+        inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
+        return inv
+
+    def get_window_index(self, grid_thw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        window_index_list = []
+        cu_window_seqlens_list = [
+            torch.zeros(1, device=grid_thw.device, dtype=torch.int32)
+        ]
+        window_index_id = torch.zeros((), device=grid_thw.device, dtype=torch.int64)
+        vit_merger_window_size = (
+            self.window_size // self.spatial_merge_size // self.patch_size
+        )
+        device = grid_thw.device
+        window_unit = vit_merger_window_size * vit_merger_window_size
+
+        for i in range(grid_thw.size(0)):
+            grid_t, grid_h, grid_w = grid_thw[i]
+            llm_grid_h = torch.div(
+                grid_h, self.spatial_merge_size, rounding_mode="floor"
+            )
+            llm_grid_w = torch.div(
+                grid_w, self.spatial_merge_size, rounding_mode="floor"
+            )
+            h_idx = torch.arange(llm_grid_h, device=device)
+            w_idx = torch.arange(llm_grid_w, device=device)
+            h_grid, w_grid = torch.meshgrid(h_idx, w_idx, indexing="ij")
+
+            hb = torch.div(h_grid, vit_merger_window_size, rounding_mode="floor")
+            wb = torch.div(w_grid, vit_merger_window_size, rounding_mode="floor")
+            hin = torch.remainder(h_grid, vit_merger_window_size)
+            win = torch.remainder(w_grid, vit_merger_window_size)
+            num_windows_w = torch.div(
+                llm_grid_w + vit_merger_window_size - 1,
+                vit_merger_window_size,
+                rounding_mode="floor",
+            )
+            num_windows_h = torch.div(
+                llm_grid_h + vit_merger_window_size - 1,
+                vit_merger_window_size,
+                rounding_mode="floor",
+            )
+            window_id = hb * num_windows_w + wb
+            within = hin * vit_merger_window_size + win
+            key = window_id * window_unit + within
+            base_order = torch.argsort(key.reshape(-1))
+
+            t_idx = torch.arange(grid_t, device=device)
+            per_t_offset = (t_idx * (llm_grid_h * llm_grid_w)).reshape(-1, 1)
+            index_new = (base_order.unsqueeze(0) + per_t_offset).reshape(-1)
+            window_index_list.append(index_new + window_index_id)
+
+            num_windows = num_windows_h * num_windows_w
+            seqlens_per_t = torch.bincount(
+                window_id.reshape(-1), minlength=num_windows
+            )
+            seqlens = (
+                seqlens_per_t.unsqueeze(0)
+                .expand(t_idx.shape[0], -1)
+                .reshape(-1)
+            )
+            cu_seqlens_tmp = (
+                seqlens.to(torch.int32).cumsum(0) * self.spatial_merge_unit
+                + cu_window_seqlens_list[-1][-1]
+            )
+            cu_window_seqlens_list.append(cu_seqlens_tmp)
+
+            window_index_id = window_index_id + grid_t * llm_grid_h * llm_grid_w
+
+        window_index = torch.cat(window_index_list, dim=0)
+        cu_window_seqlens = torch.cat(cu_window_seqlens_list, dim=0)
+        return window_index, cu_window_seqlens
+
+    @torch.compiler.disable
+    def forward(
+        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
+        hidden_states = self.patch_embed(hidden_states)
+        seq_len, _ = hidden_states.size()
+
+        grid_list = grid_thw.tolist()
+        position_embeddings_list = []
+        window_index_list = []
+        cu_window_seqlens_list = [torch.tensor([0], dtype=torch.int32)]
+        cu_seqlens_list = []
+        window_index_id = 0
+        cu_window_seqlens_last = 0
+
+        for t, h, w in grid_list:
+            (
+                position_embeddings_thw,
+                window_index_thw,
+                cu_window_seqlens_thw,
+                cu_seqlens_thw,
+            ) = self.get_rope_by_thw(int(t), int(h), int(w))
+
+            window_index_list.append(window_index_thw + window_index_id)
+            window_index_id += int(t) * (int(h) // self.spatial_merge_size) * (
+                int(w) // self.spatial_merge_size
+            )
+
+            cu_window_seqlens_thw = cu_window_seqlens_thw + cu_window_seqlens_last
+            cu_window_seqlens_last = cu_window_seqlens_thw[-1]
+            cu_window_seqlens_list.append(cu_window_seqlens_thw)
+
+            position_embeddings_list.append(position_embeddings_thw)
+            cu_seqlens_list.append(cu_seqlens_thw)
+
+        position_embeddings = (
+            torch.cat([p[0] for p in position_embeddings_list]),
+            torch.cat([p[1] for p in position_embeddings_list]),
+        )
+        window_index = torch.cat(window_index_list)
+        reverse_indices = self.invert_permutation(window_index)
+        cu_window_seqlens = torch.cat(cu_window_seqlens_list)
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens).to(torch.int32)
+        cu_seqlens = torch.cat(cu_seqlens_list)
+        cu_seqlens = torch.cumsum(cu_seqlens, dim=0, dtype=torch.int32)
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0).to(torch.int32)
+
+        max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
+
+        cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
+        cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
+        position_embeddings = (
+            position_embeddings[0].to(device=self.device, non_blocking=True),
+            position_embeddings[1].to(device=self.device, non_blocking=True),
+        )
+        window_index = window_index.to(device=hidden_states.device, non_blocking=True)
+        reverse_indices = reverse_indices.to(
+            device=hidden_states.device, non_blocking=True
+        )
+
+        hidden_states = hidden_states.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+        )
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
+
+        for layer_num, blk in enumerate(self.blocks):
+            if layer_num in self.fullatt_block_indexes:
+                cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen_full
+            else:
+                cu_seqlens_now = cu_window_seqlens
+                max_seqlen_now = max_seqlen_window
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens_now,
+                position_embeddings=position_embeddings,
+                max_seqlen=max_seqlen_now,
+                **kwargs,
+            )
+
+        # For Qwen2.5-VL-3B, float16 may overflow at last block
+        # for long visual token sequences
+        hidden_states = cast_overflow_tensors(hidden_states)
+
+        # Patch merger
+        hidden_states = self.merger(hidden_states)
+        hidden_states = hidden_states[reverse_indices, :]
+        return hidden_states
+
+
 class Qwen2_5_VLModel(nn.Module):
     base_model_prefix = ""
     _checkpoint_conversion_mapping = {"^model": "language_model"}
@@ -511,9 +1151,7 @@ class Qwen2_5_VLModel(nn.Module):
         self.language_model = Qwen2_5_VLTextModel(config.text_config)
 
         if enable_image_understanding:
-            self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(
-                config.vision_config
-            )
+            self.visual = Qwen2_5_VisionTransformer(config.vision_config)
             self.visual.to(torch.get_default_dtype())
         self.rope_deltas = None  # cache rope_deltas here
         self.config = config
@@ -776,10 +1414,9 @@ class Qwen2_5_VLModel(nn.Module):
         """
         pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
         video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
-        split_sizes = (
-            video_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
-        ).tolist()
-        video_embeds = torch.split(video_embeds, split_sizes)
+        split_sizes = video_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
+        split_indices = split_sizes.cumsum(0)[:-1].to("cpu")
+        video_embeds = torch.tensor_split(video_embeds, split_indices)
         return video_embeds
 
     def get_image_features(
@@ -798,10 +1435,9 @@ class Qwen2_5_VLModel(nn.Module):
         """
         pixel_values = pixel_values.type(self.visual.dtype)
         image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-        split_sizes = (
-            image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
-        ).tolist()
-        image_embeds = torch.split(image_embeds, split_sizes)
+        split_sizes = image_grid_thw.prod(-1) // self.visual.spatial_merge_size**2
+        split_indices = split_sizes.cumsum(0)[:-1].to("cpu")
+        image_embeds = torch.tensor_split(image_embeds, split_indices)
         return image_embeds
 
     def get_placeholder_mask(
@@ -1130,6 +1766,22 @@ class Qwen2_5_VLForConditionalGeneration(TextEncoder):
                 if not self.enable_image_understanding:
                     continue
                 name = name.replace("visual.", "model.visual.")
+            if "model.visual." in name and ".mlp.gate_proj." in name:
+                fused_name = name.replace(".mlp.gate_proj.", ".mlp.gate_up_proj.")
+                param = params_dict[fused_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = loaded_weight.to(param.dtype)
+                weight_loader(param, loaded_weight, loaded_shard_id=0)
+                loaded_params.add(fused_name)
+                continue
+            if "model.visual." in name and ".mlp.up_proj." in name:
+                fused_name = name.replace(".mlp.up_proj.", ".mlp.gate_up_proj.")
+                param = params_dict[fused_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = loaded_weight.to(param.dtype)
+                weight_loader(param, loaded_weight, loaded_shard_id=1)
+                loaded_params.add(fused_name)
+                continue
             try:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
