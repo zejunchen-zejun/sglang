@@ -217,6 +217,11 @@ sglang serve \
     --vae-precision bf16 \
     --host 0.0.0.0 \
     --port 30000 \
+    --dit-cpu-offload False \
+    --text-encoder-cpu-offload False \
+    --vae-cpu-offload False \
+    --image-encoder-cpu-offload False \
+    --use-fsdp-inference False \
     --enable-torch-compile
 ```
 
