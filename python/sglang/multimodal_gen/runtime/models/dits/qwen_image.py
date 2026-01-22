@@ -5,6 +5,7 @@
 import functools
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import aiter
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,26 +18,18 @@ from diffusers.models.normalization import AdaLayerNormContinuous
 from sglang.multimodal_gen.configs.models.dits.qwenimage import QwenImageDitConfig
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
-from sglang.multimodal_gen.runtime.layers.layernorm import (
-    LayerNorm,
-    RMSNorm,
-    apply_qk_norm,
-)
+from sglang.multimodal_gen.runtime.layers.layernorm import LayerNorm, RMSNorm
 from sglang.multimodal_gen.runtime.layers.linear import ReplicatedLinear
-from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
-    apply_flashinfer_rope_qk_inplace,
-)
-from sglang.multimodal_gen.runtime.layers.triton_ops import (
-    fuse_scale_shift_gate_select01_kernel,
-    fuse_scale_shift_kernel,
-)
 from sglang.multimodal_gen.runtime.layers.triton_ops import (
     apply_rotary_embedding,
+    fuse_scale_shift_gate_select01_kernel,
+    fuse_scale_shift_kernel,
 )
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.srt.environ import envs
 
 logger = init_logger(__name__)  # pylint: disable=invalid-name
 
@@ -554,69 +547,88 @@ class QwenImageCrossAttention(nn.Module):
         txt_key = txt_key.unflatten(-1, (self.num_heads, -1))
         txt_value = txt_value.unflatten(-1, (self.num_heads, -1))
 
-        # Apply QK normalization
-        # if self.qk_norm:
-        #     img_query, img_key = apply_qk_norm(
-        #         q=img_query,
-        #         k=img_key,
-        #         q_norm=self.norm_q,
-        #         k_norm=self.norm_k,
-        #         head_dim=img_query.shape[-1],
-        #         allow_inplace=True,
-        #     )
-        #     txt_query, txt_key = apply_qk_norm(
-        #         q=txt_query,
-        #         k=txt_key,
-        #         q_norm=self.norm_added_q,
-        #         k_norm=self.norm_added_k,
-        #         head_dim=txt_query.shape[-1],
-        #         allow_inplace=True,
-        #     )
-        if self.norm_q is not None:
-            img_query = self.norm_q(img_query)
-        if self.norm_k is not None:
-            img_key = self.norm_k(img_key)
-        if self.norm_added_q is not None:
-            txt_query = self.norm_added_q(txt_query)
-        if self.norm_added_k is not None:
-            txt_key = self.norm_added_k(txt_key)
-
-        # Apply RoPE
-        # if image_rotary_emb is not None:
-        #     if not (
-        #         isinstance(image_rotary_emb[0], torch.Tensor)
-        #         and image_rotary_emb[0].dim() == 2
-        #     ):
-        #         raise RuntimeError("image_rotary_emb must be cos_sin_cache tensors")
-
-        #     img_cache, txt_cache = image_rotary_emb
-
-        #     img_query, img_key = apply_flashinfer_rope_qk_inplace(
-        #         img_query, img_key, img_cache, is_neox=False
-        #     )
-        #     txt_query, txt_key = apply_flashinfer_rope_qk_inplace(
-        #         txt_query, txt_key, txt_cache, is_neox=False
-        #     )
-        if image_rotary_emb is not None:
+        use_fused_rope_rms = (
+            envs.SGLANG_ENABLE_FUSED_ROPE_RMS_2WAY.get()
+            and image_rotary_emb is not None
+            and isinstance(self.norm_q, RMSNorm)
+            and isinstance(self.norm_k, RMSNorm)
+            and isinstance(self.norm_added_q, RMSNorm)
+            and isinstance(self.norm_added_k, RMSNorm)
+            and img_query.is_cuda
+            and txt_query.is_cuda
+        )
+        if use_fused_rope_rms:
             (img_cos, img_sin), (txt_cos, txt_sin) = image_rotary_emb
-            img_query = apply_rotary_embedding(
-                img_query, img_cos, img_sin, interleaved=True
+            txt_cos_sin = torch.cat([txt_cos, txt_sin], dim=-1).contiguous()
+            img_cos_sin = torch.cat([img_cos, img_sin], dim=-1).contiguous()
+            batch_size = img_query.shape[0]
+            seq_len_img = img_query.shape[1]
+            num_heads_q = img_query.shape[2]
+            num_heads_k = img_key.shape[2]
+            head_size = img_query.shape[3]
+            joint_query = torch.empty(
+                (batch_size, seq_len_txt + seq_len_img, num_heads_q, head_size),
+                dtype=img_query.dtype,
+                device=img_query.device,
             )
-            img_key = apply_rotary_embedding(
-                img_key, img_cos, img_sin, interleaved=True
+            joint_key = torch.empty(
+                (batch_size, seq_len_txt + seq_len_img, num_heads_k, head_size),
+                dtype=img_key.dtype,
+                device=img_key.device,
             )
-            txt_query = apply_rotary_embedding(
-                txt_query, txt_cos, txt_sin, interleaved=True
+            joint_value = torch.cat([txt_value, img_value], dim=1)
+            aiter.fused_rope_rms_2way(
+                txt_query.contiguous(),
+                txt_key.contiguous(),
+                img_query.contiguous(),
+                img_key.contiguous(),
+                self.norm_added_q.weight,
+                self.norm_added_k.weight,
+                self.norm_q.weight,
+                self.norm_k.weight,
+                txt_cos_sin,
+                img_cos_sin,
+                batch_size,
+                seq_len_txt,
+                seq_len_img,
+                num_heads_q,
+                num_heads_k,
+                head_size,
+                True,
+                self.eps,
+                joint_query,
+                joint_key,
             )
-            txt_key = apply_rotary_embedding(
-                txt_key, txt_cos, txt_sin, interleaved=True
-            )
+        else:
+            if self.norm_q is not None:
+                img_query = self.norm_q(img_query)
+            if self.norm_k is not None:
+                img_key = self.norm_k(img_key)
+            if self.norm_added_q is not None:
+                txt_query = self.norm_added_q(txt_query)
+            if self.norm_added_k is not None:
+                txt_key = self.norm_added_k(txt_key)
 
-        # Concatenate for joint attention
-        # Order: [text, image]
-        joint_query = torch.cat([txt_query, img_query], dim=1)
-        joint_key = torch.cat([txt_key, img_key], dim=1)
-        joint_value = torch.cat([txt_value, img_value], dim=1)
+            if image_rotary_emb is not None:
+                (img_cos, img_sin), (txt_cos, txt_sin) = image_rotary_emb
+                img_query = apply_rotary_embedding(
+                    img_query, img_cos, img_sin, interleaved=True
+                )
+                img_key = apply_rotary_embedding(
+                    img_key, img_cos, img_sin, interleaved=True
+                )
+                txt_query = apply_rotary_embedding(
+                    txt_query, txt_cos, txt_sin, interleaved=True
+                )
+                txt_key = apply_rotary_embedding(
+                    txt_key, txt_cos, txt_sin, interleaved=True
+                )
+
+            # Concatenate for joint attention
+            # Order: [text, image]
+            joint_query = torch.cat([txt_query, img_query], dim=1)
+            joint_key = torch.cat([txt_key, img_key], dim=1)
+            joint_value = torch.cat([txt_value, img_value], dim=1)
 
         # Compute joint attention
         joint_hidden_states = self.attn(
