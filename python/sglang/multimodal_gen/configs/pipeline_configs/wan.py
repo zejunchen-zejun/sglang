@@ -87,6 +87,10 @@ class WanT2V480PConfig(PipelineConfig):
 
     # WanConfig-specific added parameters
 
+    def shard_latents_for_sp(self, batch, latents):
+        # Skip frame-level sharding, we shard by seq_len inside Transformer
+        return latents, False
+
     def __post_init__(self):
         self.vae_config.load_encoder = False
         self.vae_config.load_decoder = True
