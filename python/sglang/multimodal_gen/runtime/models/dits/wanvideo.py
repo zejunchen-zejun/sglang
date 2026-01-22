@@ -400,11 +400,11 @@ class WanTransformerBlock(nn.Module):
         value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
 
         # Apply rotary embeddings
-        cos, sin = freqs_cis
-        query, key = _apply_rotary_emb(
-            query, cos, sin, is_neox_style=False
-        ), _apply_rotary_emb(key, cos, sin, is_neox_style=False)
-        attn_output = self.attn1(query, key, value)
+        # cos, sin = freqs_cis
+        # query, key = _apply_rotary_emb(
+        #     query, cos, sin, is_neox_style=False
+        # ), _apply_rotary_emb(key, cos, sin, is_neox_style=False)
+        attn_output = self.attn1(query, key, value, freqs_cis=freqs_cis, is_neox_style=False)
         attn_output = attn_output.flatten(2)
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
