@@ -141,20 +141,30 @@ class RMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward for AMD ROCm (HIP) platform."""
+        shape = x.shape
+        x = x.reshape(-1, shape[-1])
+        if residual is not None:
+            residual_shape = residual.shape
+            residual = residual.view(-1, shape[-1])
+        if x.dtype == torch.float:
+            # fp32 - aiter kernels don't support fp32, use triton instead
+            out = self.forward_triton(x, residual)
+            return out.view(shape)
+        if self.variance_size_override is not None:
+            out = self.forward_native(x, residual)
+            if residual is not None:
+                return out[0].view(shape), out[1].view(residual_shape)
+            return out.view(shape)
         # Use triton when torch.compile is tracing (aiter kernels are not compatible)
         if torch._dynamo.is_compiling():
-            return self.forward_native(x, residual)
+            out = self.forward_native(x, residual)
+            # forward_native returns tuple if residual is not None
+            if residual is not None:
+                return out[0].view(shape), out[1].view(residual_shape)
+            return out.view(shape)
         # Use aiter kernels when not compiling
         if _use_aiter:
-            if not x.is_contiguous():
-                x = x.contiguous()
-            if residual is not None and not residual.is_contiguous():
-                residual = residual.contiguous()
-
-            shape = x.shape
-            x = x.reshape(-1, shape[-1])
             if residual is not None:
-                residual = residual.reshape(-1, shape[-1])
                 residual_out = torch.empty_like(x)
                 output = torch.empty_like(x)
                 aiter_fused_add_rms_norm(
@@ -165,11 +175,15 @@ class RMSNorm(CustomOp):
                     self.weight.data,
                     self.variance_epsilon,
                 )
-                return output.view(shape), residual_out.view(shape)
+                return output.view(shape), residual_out.view(residual_shape)
             out = aiter_rms_norm(x, self.weight.data, self.variance_epsilon)
             return out.view(shape)
 
-        return self.forward_native(x, residual)
+        # Fallback to native implementation
+        out = self.forward_native(x, residual)
+        if residual is not None:
+            return out[0].view(shape), out[1].view(residual_shape)
+        return out.view(shape)
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
