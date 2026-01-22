@@ -11,7 +11,9 @@ import torch.nn as nn
 
 from sglang.multimodal_gen.configs.models.dits import WanVideoConfig
 from sglang.multimodal_gen.configs.sample.wan import WanTeaCacheParams
-from sglang.multimodal_gen.runtime.distributed.parallel_state import get_sp_world_size
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_sp_world_size,
+)
 from sglang.multimodal_gen.runtime.layers.attention import (
     MinimalA2AAttnOp,
     SparseLinearAttention,
@@ -710,6 +712,54 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
 
         self.layer_names = ["blocks"]
 
+    def _shard_hidden_states_for_sp(self, hidden_states):
+        """
+        Shard hidden_states [B, S, D] -> [B, S_local, D] along seq_len dimension.
+        """
+        from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+            get_sp_parallel_rank,
+            get_sp_world_size,
+        )
+
+        sp_world_size = get_sp_world_size()
+        sp_rank = get_sp_parallel_rank()
+        seq_len = hidden_states.shape[1]
+
+        # Pad to next multiple of SP degree if needed
+        pad_len = 0
+        if seq_len % sp_world_size != 0:
+            pad_len = sp_world_size - (seq_len % sp_world_size)
+            pad = torch.zeros(
+                (hidden_states.shape[0], pad_len, hidden_states.shape[2]),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            hidden_states = torch.cat([hidden_states, pad], dim=1)
+
+        # Shard along seq_len dimension
+        local_len = hidden_states.shape[1] // sp_world_size
+        hidden_states = hidden_states[
+            :, sp_rank * local_len : (sp_rank + 1) * local_len, :
+        ].contiguous()
+
+        return hidden_states, pad_len
+
+    def _gather_hidden_states_from_sp(self, hidden_states, pad_len):
+        """
+        All-gather to restore the full hidden_states.
+        """
+        from sglang.multimodal_gen.runtime.distributed.communication_op import (
+            sequence_model_parallel_all_gather,
+        )
+
+        hidden_states = sequence_model_parallel_all_gather(
+            hidden_states.contiguous(), dim=1
+        )
+        # Remove padding
+        if pad_len > 0:
+            hidden_states = hidden_states[:, :-pad_len]
+        return hidden_states
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -740,25 +790,44 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         post_patch_height = height // p_h
         post_patch_width = width // p_w
 
-        # The rotary embedding layer correctly handles SP offsets internally.
+        # 1. Generate full RoPE (no sp_size multiplication, no internal sharding)
+        from sglang.multimodal_gen.configs.pipeline_configs.base import (
+            shard_rotary_emb_for_sp,
+        )
+        from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+            get_sp_world_size,
+        )
+
         freqs_cos, freqs_sin = self.rotary_emb.forward_from_grid(
             (
-                post_patch_num_frames * self.sp_size,
+                post_patch_num_frames,
                 post_patch_height,
                 post_patch_width,
             ),
-            shard_dim=0,
+            shard_dim=-1,  # Disable internal sharding
             start_frame=0,
             device=hidden_states.device,
         )
         assert freqs_cos.dtype == torch.float32
         assert freqs_cos.device == hidden_states.device
+
+        # 2. Shard RoPE along seq_len dimension
+        if get_sp_world_size() > 1:
+            freqs_cos = shard_rotary_emb_for_sp(freqs_cos)
+            freqs_sin = shard_rotary_emb_for_sp(freqs_sin)
+
         freqs_cis = (
             (freqs_cos.float(), freqs_sin.float()) if freqs_cos is not None else None
         )
 
         hidden_states = self.patch_embedding(hidden_states)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
+
+        # === Shard hidden_states along seq_len dimension ===
+        if get_sp_world_size() > 1:
+            hidden_states, self._seq_pad_len = self._shard_hidden_states_for_sp(
+                hidden_states
+            )
         # timestep shape: batch_size, or batch_size, seq_len (wan 2.2 ti2v)
         if timestep.dim() == 2:
             # ti2v
@@ -815,6 +884,17 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             # if teacache is enabled, we need to cache the original hidden states
             if enable_teacache:
                 self.maybe_cache_states(hidden_states, original_hidden_states)
+
+        # === All-gather to restore full seq_len ===
+        from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+            get_sp_world_size,
+        )
+
+        if get_sp_world_size() > 1:
+            hidden_states = self._gather_hidden_states_from_sp(
+                hidden_states, self._seq_pad_len
+            )
+
         # 5. Output norm, projection & unpatchify
         if temb.dim() == 3:
             # batch_size, seq_len, inner_dim (wan 2.2 ti2v)
