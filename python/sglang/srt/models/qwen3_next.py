@@ -175,7 +175,7 @@ class Qwen3GatedDeltaNet(nn.Module):
             quant_config=None,
             tp_rank=self.attn_tp_rank,
             tp_size=self.attn_tp_size,
-            # prefix=add_prefix("in_proj_ba", prefix),
+            prefix=add_prefix("in_proj_ba", prefix),
         )
 
         query_key_settings = (self.key_dim, 0, False)
