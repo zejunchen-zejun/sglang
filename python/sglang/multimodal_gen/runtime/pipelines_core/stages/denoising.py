@@ -5,6 +5,7 @@
 Denoising stage for diffusion pipelines.
 """
 
+import dataclasses
 import inspect
 import math
 import os
@@ -20,10 +21,7 @@ from tqdm.auto import tqdm
 
 from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType, STA_Mode
-from sglang.multimodal_gen.configs.pipeline_configs.wan import (
-    Wan2_2_TI2V_5B_Config,
-    WanI2V480PConfig,
-)
+from sglang.multimodal_gen.configs.pipeline_configs.wan import Wan2_2_TI2V_5B_Config
 from sglang.multimodal_gen.runtime.distributed import (
     cfg_model_parallel_all_reduce,
     get_local_torch_device,
@@ -1243,6 +1241,35 @@ class DenoisingStage(PipelineStage):
             **kwargs,
         )
 
+    def _concat_batch_kwargs(
+        self,
+        kwargs1: dict[str, Any],
+        kwargs2: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Concatenate tensors from two kwargs dicts on batch dimension (dim=0)"""
+        concat_kwargs = {}
+        all_keys = set(kwargs1.keys()) | set(kwargs2.keys())
+
+        for key in all_keys:
+            val1 = kwargs1.get(key)
+            val2 = kwargs2.get(key)
+
+            # If both exist
+            if val1 is not None and val2 is not None:
+                # Handle Tensor type
+                if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                    concat_kwargs[key] = torch.cat([val1, val2], dim=0)
+                # ⚠️ Fix: Handle list type (e.g., encoder_hidden_states)
+                elif isinstance(val1, list) and isinstance(val2, list):
+                    concat_kwargs[key] = [
+                        torch.cat([t1, t2], dim=0) for t1, t2 in zip(val1, val2)
+                    ]
+                else:
+                    # For other non-tensor types, use the first value (assuming they are the same)
+                    concat_kwargs[key] = val1
+
+        return concat_kwargs
+
     def _predict_noise_with_cfg(
         self,
         current_model: torch.nn.Module,
@@ -1282,51 +1309,133 @@ class DenoisingStage(PipelineStage):
         noise_pred_cond: torch.Tensor | None = None
         noise_pred_uncond: torch.Tensor | None = None
         cfg_rank = get_classifier_free_guidance_rank()
-        # positive pass
-        if not (server_args.enable_cfg_parallel and cfg_rank != 0):
-            batch.is_cfg_negative = False
-            with set_forward_context(
-                current_timestep=timestep_index,
-                attn_metadata=attn_metadata,
-                forward_batch=batch,
-            ):
-                noise_pred_cond = self._predict_noise(
-                    current_model=current_model,
-                    latent_model_input=latent_model_input,
-                    timestep=timestep,
-                    target_dtype=target_dtype,
-                    guidance=guidance,
-                    **image_kwargs,
-                    **pos_cond_kwargs,
-                )
-                # TODO: can it be moved to after _predict_noise_with_cfg?
-                noise_pred_cond = server_args.pipeline_config.slice_noise_pred(
-                    noise_pred_cond, latents
-                )
-        if not batch.do_classifier_free_guidance:
-            # If CFG is disabled, we are done. Return the conditional prediction.
-            return noise_pred_cond
+        # If CFG parallel is not enabled, use merged batch for single inference
+        if not server_args.enable_cfg_parallel and batch.do_classifier_free_guidance:
+            # Duplicate latent on batch dimension: [cond, uncond]
+            latent_model_input_batched = torch.cat(
+                [latent_model_input, latent_model_input], dim=0
+            )
+            # Merge conditional kwargs
+            batched_cond_kwargs = self._concat_batch_kwargs(
+                pos_cond_kwargs, neg_cond_kwargs
+            )
+            # If image_kwargs contains tensors that need duplication, also concatenate them
+            batched_image_kwargs = {}
+            for key, val in image_kwargs.items():
+                if isinstance(val, torch.Tensor):
+                    # Image is the same for positive and negative prompts, so duplicate it
+                    batched_image_kwargs[key] = torch.cat([val, val], dim=0)
+                else:
+                    batched_image_kwargs[key] = val
 
-        # negative pass
-        if not server_args.enable_cfg_parallel or cfg_rank != 0:
-            batch.is_cfg_negative = True
+            # Expand timestep and guidance to match batched input
+            if isinstance(timestep, torch.Tensor):
+                timestep_batched = torch.cat([timestep, timestep], dim=0)
+            else:
+                timestep_batched = timestep
+
+            if isinstance(guidance, torch.Tensor):
+                guidance_batched = torch.cat([guidance, guidance], dim=0)
+            else:
+                guidance_batched = guidance
+
+            # ⚠️ Create vectorized is_cfg_negative flag
+            # First half of batch is positive (False), second half is negative (True)
+            batch_size_single = latent_model_input.shape[0]
+            is_cfg_negative_batched = torch.cat(
+                [
+                    torch.zeros(
+                        batch_size_single,
+                        dtype=torch.bool,
+                        device=latent_model_input.device,
+                    ),  # positive
+                    torch.ones(
+                        batch_size_single,
+                        dtype=torch.bool,
+                        device=latent_model_input.device,
+                    ),  # negative
+                ],
+                dim=0,
+            )
+
+            # Single inference
             with set_forward_context(
                 current_timestep=timestep_index,
                 attn_metadata=attn_metadata,
-                forward_batch=batch,
+                forward_batch=dataclasses.replace(
+                    batch, is_cfg_negative=is_cfg_negative_batched
+                ),
             ):
-                noise_pred_uncond = self._predict_noise(
+                noise_pred_batched = self._predict_noise(
                     current_model=current_model,
-                    latent_model_input=latent_model_input,
-                    timestep=timestep,
+                    latent_model_input=latent_model_input_batched,
+                    timestep=timestep_batched,
                     target_dtype=target_dtype,
-                    guidance=guidance,
-                    **image_kwargs,
-                    **neg_cond_kwargs,
+                    guidance=guidance_batched,
+                    **batched_image_kwargs,
+                    **batched_cond_kwargs,
                 )
-                noise_pred_uncond = server_args.pipeline_config.slice_noise_pred(
-                    noise_pred_uncond, latents
-                )
+
+            # Split cond and uncond from batched output
+            batch_size = latent_model_input.shape[0]
+            noise_pred_cond = noise_pred_batched[:batch_size]
+            noise_pred_uncond = noise_pred_batched[batch_size:]
+
+            # Apply slice operation
+            noise_pred_cond = server_args.pipeline_config.slice_noise_pred(
+                noise_pred_cond, latents
+            )
+            noise_pred_uncond = server_args.pipeline_config.slice_noise_pred(
+                noise_pred_uncond, latents
+            )
+
+        else:
+            # Original separate inference logic (for CFG parallel or non-CFG cases)
+            # positive pass
+            if not (server_args.enable_cfg_parallel and cfg_rank != 0):
+                batch.is_cfg_negative = False
+                with set_forward_context(
+                    current_timestep=timestep_index,
+                    attn_metadata=attn_metadata,
+                    forward_batch=batch,
+                ):
+                    noise_pred_cond = self._predict_noise(
+                        current_model=current_model,
+                        latent_model_input=latent_model_input,
+                        timestep=timestep,
+                        target_dtype=target_dtype,
+                        guidance=guidance,
+                        **image_kwargs,
+                        **pos_cond_kwargs,
+                    )
+                    # TODO: can it be moved to after _predict_noise_with_cfg?
+                    noise_pred_cond = server_args.pipeline_config.slice_noise_pred(
+                        noise_pred_cond, latents
+                    )
+            if not batch.do_classifier_free_guidance:
+                # If CFG is disabled, we are done. Return the conditional prediction.
+                return noise_pred_cond
+
+            # negative pass
+            if not server_args.enable_cfg_parallel or cfg_rank != 0:
+                batch.is_cfg_negative = True
+                with set_forward_context(
+                    current_timestep=timestep_index,
+                    attn_metadata=attn_metadata,
+                    forward_batch=batch,
+                ):
+                    noise_pred_uncond = self._predict_noise(
+                        current_model=current_model,
+                        latent_model_input=latent_model_input,
+                        timestep=timestep,
+                        target_dtype=target_dtype,
+                        guidance=guidance,
+                        **image_kwargs,
+                        **neg_cond_kwargs,
+                    )
+                    noise_pred_uncond = server_args.pipeline_config.slice_noise_pred(
+                        noise_pred_uncond, latents
+                    )
 
         # Combine predictions
         if server_args.enable_cfg_parallel:
