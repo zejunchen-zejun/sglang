@@ -1265,8 +1265,12 @@ class DenoisingStage(PipelineStage):
                         torch.cat([t1, t2], dim=0) for t1, t2 in zip(val1, val2)
                     ]
                 else:
-                    # For other non-tensor types, use the first value (assuming they are the same)
-                    concat_kwargs[key] = val1
+                    # Unsupported type - raise error with type information
+                    raise TypeError(
+                        f"Unsupported type for CFG batch concatenation: key='{key}', "
+                        f"type(val1)={type(val1)}, type(val2)={type(val2)}. "
+                        f"Only torch.Tensor and list types are supported."
+                    )
 
         return concat_kwargs
 
