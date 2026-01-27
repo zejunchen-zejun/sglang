@@ -258,6 +258,8 @@ class ServerArgs:
     dp_degree: int = 1
     # cfg parallel
     enable_cfg_parallel: bool = False
+    # cfg batch (merge positive and negative prompts in single forward pass)
+    enable_cfg_batch: bool = False
 
     hsdp_replicate_dim: int = 1
     hsdp_shard_dim: int = -1
@@ -503,6 +505,12 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.enable_cfg_parallel,
             help="Enable cfg parallel.",
+        )
+        parser.add_argument(
+            "--enable-cfg-batch",
+            action="store_true",
+            default=ServerArgs.enable_cfg_batch,
+            help="Enable cfg batch (merge positive and negative prompts in single forward pass for better efficiency).",
         )
         parser.add_argument(
             "--data-parallel-size",
@@ -1009,6 +1017,13 @@ class ServerArgs:
                 raise ValueError(
                     "CFG Parallelism is enabled via `--enable-cfg-parallel`, while -num-gpus==1"
                 )
+
+        if self.enable_cfg_batch and self.enable_cfg_parallel:
+            raise ValueError(
+                "Cannot enable both CFG batch (--enable-cfg-batch) and CFG parallel (--enable-cfg-parallel) at the same time. "
+                "Please choose only one: use --enable-cfg-batch for merged batch inference, "
+                "or --enable-cfg-parallel for parallel CFG computation."
+            )
 
         if os.getenv("SGLANG_CACHE_DIT_ENABLED", "").lower() == "true":
             has_sp = self.sp_degree > 1
