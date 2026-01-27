@@ -1309,12 +1309,8 @@ class DenoisingStage(PipelineStage):
         noise_pred_cond: torch.Tensor | None = None
         noise_pred_uncond: torch.Tensor | None = None
         cfg_rank = get_classifier_free_guidance_rank()
-        # If CFG batch is enabled and CFG parallel is not enabled, use merged batch for single inference
-        if (
-            server_args.enable_cfg_batch
-            and not server_args.enable_cfg_parallel
-            and batch.do_classifier_free_guidance
-        ):
+        # If CFG parallel is not enabled, use merged batch for single inference
+        if not server_args.enable_cfg_parallel and batch.do_classifier_free_guidance:
             # Duplicate latent on batch dimension: [cond, uncond]
             latent_model_input_batched = torch.cat(
                 [latent_model_input, latent_model_input], dim=0
