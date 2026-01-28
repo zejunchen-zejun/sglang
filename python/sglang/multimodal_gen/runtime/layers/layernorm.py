@@ -376,8 +376,8 @@ class _ScaleResidualNormScaleShift(CustomOp):
         residual: torch.Tensor,
         x: torch.Tensor,
         gate: torch.Tensor | int,
-        shift: torch.Tensor,
-        scale: torch.Tensor,
+        shift: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if x.shape[-1] % 256 != 0 and x.shape[-1] <= 8192:
             import warnings
@@ -397,6 +397,10 @@ class _ScaleResidualNormScaleShift(CustomOp):
                 f"Only gate value of 1 is supported for int type, but got {gate}"
             )
 
+        if shift is None and scale is None:
+            return self.forward_native(residual, x, gate, shift, scale)
+
+        assert shift is not None and scale is not None, "shift and scale must be provided"
         return fused_scale_residual_norm_scale_shift(
             residual.contiguous(),
             x.contiguous(),
@@ -419,8 +423,8 @@ class _ScaleResidualNormScaleShift(CustomOp):
         residual: torch.Tensor,
         x: torch.Tensor,
         gate: torch.Tensor | int,
-        shift: torch.Tensor,
-        scale: torch.Tensor,
+        shift: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # x.shape: [batch_size, seq_len, inner_dim]
         if isinstance(gate, int):
@@ -441,7 +445,15 @@ class _ScaleResidualNormScaleShift(CustomOp):
         else:
             raise ValueError(f"Gate type {type(gate)} not supported")
         normalized = self.norm(residual_output)
-        modulated = fuse_scale_shift_kernel(normalized, scale, shift)
+        if shift is None and scale is None:
+            return normalized, residual_output
+
+        assert shift is not None and scale is not None, "shift and scale must be provided"
+        modulated = fuse_scale_shift_kernel(
+            normalized,
+            scale,
+            shift,
+        )
         return modulated, residual_output
 
 
