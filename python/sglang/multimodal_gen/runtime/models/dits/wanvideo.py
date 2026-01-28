@@ -11,9 +11,7 @@ import torch.nn as nn
 
 from sglang.multimodal_gen.configs.models.dits import WanVideoConfig
 from sglang.multimodal_gen.configs.sample.wan import WanTeaCacheParams
-from sglang.multimodal_gen.runtime.distributed.parallel_state import (
-    get_sp_world_size,
-)
+from sglang.multimodal_gen.runtime.distributed.parallel_state import get_sp_world_size
 from sglang.multimodal_gen.runtime.layers.attention import (
     MinimalA2AAttnOp,
     SparseLinearAttention,
@@ -269,8 +267,10 @@ class WanTransformerBlock(nn.Module):
         prefix: str = "",
         attention_type: str = "original",
         sla_topk: float = 0.1,
+        enable_torch_compile: bool = False,
     ):
         super().__init__()
+        self.enable_torch_compile = enable_torch_compile
 
         # 1. Self-attention
         self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
@@ -336,14 +336,18 @@ class WanTransformerBlock(nn.Module):
                 eps=eps,
                 supported_attention_backends=supported_attention_backends,
             )
-        self.cross_attn_residual_norm = ScaleResidualLayerNormScaleShift(
-            dim,
-            norm_type="layer",
-            eps=eps,
-            elementwise_affine=False,
-            dtype=torch.float32,
-            compute_dtype=torch.float32,
-        )
+
+        if enable_torch_compile:
+            self.norm2 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        else:
+            self.cross_attn_residual_norm = ScaleResidualLayerNormScaleShift(
+                dim,
+                norm_type="layer",
+                eps=eps,
+                elementwise_affine=False,
+                dtype=torch.float32,
+                compute_dtype=torch.float32,
+            )
 
         # 3. Feed-forward
         self.ffn = MLP(dim, ffn_dim, act_type="gelu_pytorch_tanh")
@@ -416,16 +420,25 @@ class WanTransformerBlock(nn.Module):
             orig_dtype
         ), hidden_states.to(orig_dtype)
 
-        # 2. Cross-attention
+        # 2. Cross-attention: choose operation based on enable_torch_compile
         attn_output = self.attn2(
             norm_hidden_states, context=encoder_hidden_states, context_lens=None
         )
-        norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
-            hidden_states, attn_output, 1, c_shift_msa, c_scale_msa
-        )
-        norm_hidden_states, hidden_states = norm_hidden_states.to(
-            orig_dtype
-        ), hidden_states.to(orig_dtype)
+
+        if self.enable_torch_compile:
+            # torch.compile-friendly separated operations
+            hidden_states = hidden_states + attn_output
+            norm_hidden_states = (
+                self.norm2(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa
+            ).to(orig_dtype)
+        else:
+            # Original fused operations
+            norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
+                hidden_states, attn_output, 1, c_shift_msa, c_scale_msa
+            )
+            norm_hidden_states, hidden_states = norm_hidden_states.to(
+                orig_dtype
+            ), hidden_states.to(orig_dtype)
 
         # 3. Feed-forward
         ff_output = self.ffn(norm_hidden_states)
@@ -448,8 +461,10 @@ class WanTransformerBlock_VSA(nn.Module):
         added_kv_proj_dim: int | None = None,
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
         prefix: str = "",
+        enable_torch_compile: bool = False,
     ):
         super().__init__()
+        self.enable_torch_compile = enable_torch_compile
 
         # 1. Self-attention
         self.norm1 = FP32LayerNorm(dim, eps, elementwise_affine=False)
@@ -510,14 +525,18 @@ class WanTransformerBlock_VSA(nn.Module):
                 eps=eps,
                 supported_attention_backends=supported_attention_backends,
             )
-        self.cross_attn_residual_norm = ScaleResidualLayerNormScaleShift(
-            dim,
-            norm_type="layer",
-            eps=eps,
-            elementwise_affine=False,
-            dtype=torch.float32,
-            compute_dtype=torch.float32,
-        )
+
+        if enable_torch_compile:
+            self.norm2 = FP32LayerNorm(dim, eps, elementwise_affine=False)
+        else:
+            self.cross_attn_residual_norm = ScaleResidualLayerNormScaleShift(
+                dim,
+                norm_type="layer",
+                eps=eps,
+                elementwise_affine=False,
+                dtype=torch.float32,
+                compute_dtype=torch.float32,
+            )
 
         # 3. Feed-forward
         self.ffn = MLP(dim, ffn_dim, act_type="gelu_pytorch_tanh")
@@ -575,6 +594,7 @@ class WanTransformerBlock_VSA(nn.Module):
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
 
+        # Self-attention always uses fused operations
         norm_hidden_states, hidden_states = self.self_attn_residual_norm(
             hidden_states, attn_output, gate_msa, None, None
         )
@@ -582,16 +602,25 @@ class WanTransformerBlock_VSA(nn.Module):
             orig_dtype
         ), hidden_states.to(orig_dtype)
 
-        # 2. Cross-attention
+        # 2. Cross-attention: choose operation based on enable_torch_compile
         attn_output = self.attn2(
             norm_hidden_states, context=encoder_hidden_states, context_lens=None
         )
-        norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
-            hidden_states, attn_output, 1, c_shift_msa, c_scale_msa
-        )
-        norm_hidden_states, hidden_states = norm_hidden_states.to(
-            orig_dtype
-        ), hidden_states.to(orig_dtype)
+
+        if self.enable_torch_compile:
+            # torch.compile-friendly separated operations
+            hidden_states = hidden_states + attn_output
+            norm_hidden_states = (
+                self.norm2(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa
+            ).to(orig_dtype)
+        else:
+            # Original fused operations
+            norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
+                hidden_states, attn_output, 1, c_shift_msa, c_scale_msa
+            )
+            norm_hidden_states, hidden_states = norm_hidden_states.to(
+                orig_dtype
+            ), hidden_states.to(orig_dtype)
 
         # 3. Feed-forward
         ff_output = self.ffn(norm_hidden_states)
@@ -638,12 +667,17 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
 
         # 3. Transformer blocks
-        attn_backend = get_global_server_args().attention_backend
+        server_args = get_global_server_args()
+        attn_backend = server_args.attention_backend
         transformer_block = (
             WanTransformerBlock_VSA
             if (attn_backend and attn_backend.lower() == "video_sparse_attn")
             else WanTransformerBlock
         )
+
+        # Get enable_torch_compile from server args
+        enable_torch_compile = getattr(server_args, "enable_torch_compile", False)
+
         self.blocks = nn.ModuleList(
             [
                 transformer_block(
@@ -659,6 +693,7 @@ class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                     prefix=f"{config.prefix}.blocks.{i}",
                     attention_type=config.attention_type,
                     sla_topk=config.sla_topk,
+                    enable_torch_compile=enable_torch_compile,
                 )
                 for i in range(config.num_layers)
             ]
