@@ -1260,6 +1260,7 @@ class AutoencoderKLWan(ParallelTiledVAE):
         enc = torch.cat([first_frame, enc], dim=2)
         return enc
 
+    @torch.compile(dynamic=True)
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         if self.use_feature_cache:
             self.clear_cache()
