@@ -28,6 +28,7 @@ if [[ "${TYPE}" == "launch" ]]; then
     echo "========== LAUNCHING SERVER ========"
     if [[ "${model_name}" == "Qwen3-VL-235B" ]]; then
         export SGLANG_USE_AITER=1
+        export TORCH_NCCL_BLOCKING_WAIT=1
         echo "********** AOT Prebuild aiter kernel start ... **********"
         cd /aiter
         python3 op_tests/test_rope.py
@@ -86,6 +87,7 @@ if [[ "${TYPE}" == "launch" ]]; then
         export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
         export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=0
         export ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+        export TORCH_NCCL_BLOCKING_WAIT=1
         echo "********** AOT Prebuild aiter kernel start ... **********"
         cd /aiter
         python3 op_tests/test_rope.py
@@ -119,6 +121,7 @@ if [[ "${TYPE}" == "launch" ]]; then
         export SGLANG_ROCM_USE_AITER_PA_ASM_PRESHUFFLE_LAYOUT=0
         export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
         export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=1
+        export TORCH_NCCL_BLOCKING_WAIT=1
         python3 -m sglang.launch_server \
             --model-path "${model_path}" \
             --host localhost \

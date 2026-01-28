@@ -57,6 +57,7 @@
     echo "launching ${model}"
     echo "TP=${TP}"
      # AITER_MOE_PADDING_SIZE=128 \ only for fp8 tp8
+     TORCH_NCCL_BLOCKING_WAIT=1 \
      AITER_MOE_SMALL_BATCH=1 \
      SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=0 \
      ROCM_QUICK_REDUCE_QUANTIZATION=INT4 \
@@ -77,15 +78,18 @@
         --mm-attention-backend "aiter_attn" \
         --max-prefill-tokens 32768 \
         --disable-radix-cache \
-        --page-size 32 \
+        --page-size 1024 \
+        --kv-cache-dtype fp8_e4m3 \
         --mm-enable-dp-encoder \
         --enable-aiter-allreduce-fusion \
         --max-running-requests 128 \
-        --cuda-graph-max-bs 8
+        --cuda-graph-max-bs 16
         2>&1 | tee log.server.log &
 
     ```
-    Please add **AITER_MOE_PADDING_SIZE=128** when launch server for fp8 model with tp8.
+    Please note
+    - add **AITER_MOE_PADDING_SIZE=128** when launch server for fp8 model with tp8.
+    - add **TORCH_NCCL_BLOCKING_WAIT=1** as temporal workaround due to a known HIP runtime bug during cuda graph caputure, which that is tracked here: [ROCm/hip#3876](https://github.com/ROCm/hip/issues/3876).
 
 # Curl request
 
