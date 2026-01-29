@@ -268,8 +268,8 @@ class Qwen3GatedDeltaNet(nn.Module):
 
         # [b, sq, ng, (hn + hn + np/ng * hn + np/ng + np/ng)]
         # --> [b, sq, ng, hn], [b, sq, ng, hn], [b, sq, ng, np/ng * hn], [b, sq, ng, np/ng * hn], [b, sq, ng, np/ng], [b, sq, ng, np/ng]
-        (query, key, value, z) = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=2)
-        (b, a) = torch.split(mixed_ba, split_arg_list_ba, dim=2)
+        query, key, value, z = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=2)
+        b, a = torch.split(mixed_ba, split_arg_list_ba, dim=2)
 
         # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
         value = value.reshape(value.size(0), -1, self.head_v_dim)
@@ -945,6 +945,8 @@ class Qwen3NextForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader")
+                if loaded_weight.ndim == 1 and param.ndim == 2:
+                    loaded_weight = loaded_weight.unsqueeze(-1)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -983,6 +985,8 @@ class Qwen3NextForCausalLM(nn.Module):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
+                    if loaded_weight.ndim == 1 and param.ndim == 2:
+                        loaded_weight = loaded_weight.unsqueeze(-1)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
