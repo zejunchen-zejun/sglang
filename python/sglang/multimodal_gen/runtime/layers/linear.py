@@ -36,6 +36,26 @@ from sglang.multimodal_gen.runtime.models.parameter import (
 from sglang.multimodal_gen.runtime.models.utils import set_weight_attrs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
+from sglang.srt.layers.amx_utils import _amx_process_weight_after_loading
+from sglang.srt.layers.quantization.compressed_tensors.utils import (
+    AiterHipblaslt,
+    rocm_aiter_swizzle_hipb_unquantized_gemm
+)
+from sglang.srt.utils import (
+    cpu_has_amx_support,
+    get_bool_env_var,
+    is_cpu,
+    is_hip
+)
+
+_is_cpu_amx_available = cpu_has_amx_support()
+_is_hip = is_hip()
+_is_cpu = is_cpu()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+
+if _use_aiter:
+    from aiter.ops.shuffle import shuffle_weight
+
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
@@ -146,14 +166,50 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        #import pdb; pdb.set_trace()
+        if _is_cpu and _is_cpu_amx_available:
+            _amx_process_weight_after_loading(layer, ["weight"])
+
+        if _use_aiter and get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE"):
+            AiterHipblaslt._initialize_hipblaslt()
+            layout = (16, 16)
+            weight = layer.weight
+            # if can_shuffle(weight.shape[0], weight.shape[1], layout) and weight.shape[0] != 18992:
+            if AiterHipblaslt.can_shuffle(weight.shape[0], weight.shape[1], layout):
+                shuffled_weight = shuffle_weight(weight, layout).t()
+                self._aiter_trans_weight = False
+            else:
+                shuffled_weight = weight
+                self._aiter_trans_weight = True
+
+            layer.weight = Parameter(shuffled_weight.data, requires_grad=False)
+
+
+
     def apply(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        output = (
-            F.linear(x, layer.weight, bias)
-            if torch.cuda.is_available() or bias is None
-            else F.linear(x, layer.weight, bias.to(x.dtype))
-        )  # NOTE: this line assumes that we are using amp when using cuda and is needed to account for the fact that amp isn't supported in mps
+        #if not hasattr(self, '_aiter_trans_weight'):  
+        #    self._aiter_trans_weight = True
+        #print(f'_use_aiter={_use_aiter}, _aiter_trans_weight={self._aiter_trans_weight}, SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE={get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE")}')
+        #import pdb; pdb.set_trace()
+        if (
+            _use_aiter
+            and get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE")
+            and not self._aiter_trans_weight
+        ):
+            if torch.cuda.is_available() or bias is None:
+                output = rocm_aiter_swizzle_hipb_unquantized_gemm(x, layer.weight, bias)
+            else:
+                output = rocm_aiter_swizzle_hipb_unquantized_gemm(x, layer.weight, bias.to(x.dtype))
+        else:
+            output = (
+                F.linear(x, layer.weight, bias)
+                if torch.cuda.is_available() or bias is None
+                else F.linear(x, layer.weight, bias.to(x.dtype))
+            )  # NOTE: this line assumes that we are using amp when using cuda and is needed to account for the fact that amp isn't supported in mps
+        
         return output
 
 

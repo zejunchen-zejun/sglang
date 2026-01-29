@@ -497,6 +497,7 @@ class Qwen2_5_VLMLP(nn.Module):
         self.act = ACT2FN[hidden_act]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self._aiter_trans_weight=False
         gate_up, _ = self.gate_up_proj(x)
         gate, up = gate_up.chunk(2, dim=-1)
         x = self.act(gate) * up

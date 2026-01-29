@@ -513,6 +513,11 @@ class TextEncoderLoader(ComponentLoader):
                     "Following model weights were not initialized from "
                     f"checkpoint: {weights_not_loaded}"
                 )
+            
+        for _, module in model.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            if quant_method is not None:
+                quant_method.process_weights_after_loading(module) 
 
         return model.eval()
 
@@ -657,6 +662,13 @@ class VAELoader(ComponentLoader):
         ), f"Found {len(safetensors_list)} safetensors files in {component_model_path}"
         loaded = safetensors_load_file(safetensors_list[0])
         vae.load_state_dict(loaded, strict=False)
+
+        # 添加权重后处理以应用 shuffle 优化  
+        for _, module in vae.named_modules():  
+            quant_method = getattr(module, "quant_method", None)  
+            if quant_method is not None:  
+                quant_method.process_weights_after_loading(module)
+        
         return vae.eval()
 
 
@@ -741,6 +753,12 @@ class TransformerLoader(ComponentLoader):
 
         total_params = sum(p.numel() for p in model.parameters())
         logger.info("Loaded model with %.2fB parameters", total_params / 1e9)
+
+        # 添加权重后处理以应用 shuffle 优化  
+        for _, module in model.named_modules():  
+            quant_method = getattr(module, "quant_method", None)  
+            if quant_method is not None:  
+                quant_method.process_weights_after_loading(module)
 
         assert (
             next(model.parameters()).dtype == default_dtype
