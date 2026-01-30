@@ -889,12 +889,7 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
 
         self.img_in = nn.Linear(in_channels, self.inner_dim)
         self.txt_in = nn.Linear(joint_attention_dim, self.inner_dim)
-
-        self.img_norm1 = RMSNorm(self.inner_dim, eps=1e-6)
-        self.txt_norm1 = RMSNorm(self.inner_dim, eps=1e-6)
-
-        self.img_mod1 = nn.Linear(self.inner_dim, self.inner_dim, bias=False)
-
+        
         self.transformer_blocks = nn.ModuleList(
             [
                 QwenImageTransformerBlock(

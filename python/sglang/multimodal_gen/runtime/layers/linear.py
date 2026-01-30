@@ -190,10 +190,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def apply(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        #if not hasattr(self, '_aiter_trans_weight'):  
-        #    self._aiter_trans_weight = True
-        #print(f'_use_aiter={_use_aiter}, _aiter_trans_weight={self._aiter_trans_weight}, SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE={get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE")}')
-        #import pdb; pdb.set_trace()
         if (
             _use_aiter
             and get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE")

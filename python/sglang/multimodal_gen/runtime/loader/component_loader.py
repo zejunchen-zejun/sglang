@@ -663,7 +663,7 @@ class VAELoader(ComponentLoader):
         loaded = safetensors_load_file(safetensors_list[0])
         vae.load_state_dict(loaded, strict=False)
 
-        # 添加权重后处理以应用 shuffle 优化  
+        # Add weight post-processing to apply shuffle optimization 
         for _, module in vae.named_modules():  
             quant_method = getattr(module, "quant_method", None)  
             if quant_method is not None:  
@@ -754,7 +754,7 @@ class TransformerLoader(ComponentLoader):
         total_params = sum(p.numel() for p in model.parameters())
         logger.info("Loaded model with %.2fB parameters", total_params / 1e9)
 
-        # 添加权重后处理以应用 shuffle 优化  
+        # Add weight post-processing to apply shuffle optimization
         for _, module in model.named_modules():  
             quant_method = getattr(module, "quant_method", None)  
             if quant_method is not None:  
