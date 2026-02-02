@@ -66,6 +66,13 @@ class ComponentLoader(ABC):
         else:
             return get_local_torch_device()
 
+    def _postprocess_quantized_weights(self, component: nn.Module) -> None:
+        for _, module in component.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            process = getattr(quant_method, "process_weights_after_loading", None)
+            if callable(process):
+                process(module)
+
     def load(
         self,
         component_model_path: str,
@@ -122,6 +129,7 @@ class ComponentLoader(ABC):
             consumed = 0.0
         else:
             if isinstance(component, nn.Module):
+                self._postprocess_quantized_weights(component)
                 component = component.eval()
             current_gpu_mem = current_platform.get_available_gpu_memory()
             consumed = gpu_mem_before_loading - current_gpu_mem

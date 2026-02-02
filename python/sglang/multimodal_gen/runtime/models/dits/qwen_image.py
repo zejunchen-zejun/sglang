@@ -1235,7 +1235,7 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
 
         self.img_in = nn.Linear(in_channels, self.inner_dim)
         self.txt_in = nn.Linear(joint_attention_dim, self.inner_dim)
-
+        
         self.transformer_blocks = nn.ModuleList(
             [
                 QwenImageTransformerBlock(
@@ -1253,9 +1253,7 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         self.norm_out = AdaLayerNormContinuous(
             self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6
         )
-        self.proj_out = nn.Linear(
-            self.inner_dim, patch_size * patch_size * self.out_channels, bias=True
-        )
+        self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
 
         self.timestep_zero = torch.zeros(
             (1,), dtype=torch.int, device=get_local_torch_device()
