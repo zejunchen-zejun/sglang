@@ -267,6 +267,8 @@ class LoRAPipeline(ComposedPipelineBase):
                     )
                 except Exception:
                     inferred_rank = None
+                # Default to None for some checkpoints without "<layer>.alpha"
+                inferred_alpha: int | None = None
                 alpha_key = name + ".alpha"
                 if alpha_key in self.lora_adapters[lora_nickname]:
                     try:

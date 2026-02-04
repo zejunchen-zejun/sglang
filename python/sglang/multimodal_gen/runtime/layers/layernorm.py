@@ -6,9 +6,9 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch._dynamo
 import torch.nn as nn
 import torch.nn.functional as F
-from sgl_kernel import fused_add_rmsnorm, rmsnorm
 
 from sglang.jit_kernel.norm import can_use_fused_inplace_qknorm, fused_inplace_qknorm
 from sglang.multimodal_gen.runtime.layers.custom_op import CustomOp
@@ -17,7 +17,21 @@ from sglang.multimodal_gen.runtime.layers.triton_ops import (
     norm_infer,
     rms_norm_fn,
 )
+from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.common import get_bool_env_var
+
+# Platform detection
+_is_hip = current_platform.is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+
+# Import optimized kernels based on platform
+if current_platform.is_cuda():
+    from sgl_kernel import fused_add_rmsnorm, rmsnorm
+
+# Import aiter kernels if available
+if _use_aiter:
+    from aiter import rmsnorm2d_fwd as aiter_rms_norm
+    from aiter import rmsnorm2d_fwd_with_add as aiter_fused_add_rms_norm
 
 
 # Copied and adapted from sglang
@@ -126,8 +140,50 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        # ROCm builds of sgl-kernel do not expose rmsnorm custom ops yet.
-        return self.forward_native(x, residual)
+        """Forward for AMD ROCm (HIP) platform."""
+        shape = x.shape
+        x = x.reshape(-1, shape[-1])
+        if residual is not None:
+            residual_shape = residual.shape
+            residual = residual.view(-1, shape[-1])
+        if x.dtype == torch.float:
+            # fp32 - aiter kernels don't support fp32, use triton instead
+            out = self.forward_triton(x, residual)
+            return out.view(shape)
+        if self.variance_size_override is not None:
+            out = self.forward_native(x, residual)
+            if residual is not None:
+                return out[0].view(shape), out[1].view(residual_shape)
+            return out.view(shape)
+        # Use triton when torch.compile is tracing (aiter kernels are not compatible)
+        if torch._dynamo.is_compiling():
+            out = self.forward_native(x, residual)
+            # forward_native returns tuple if residual is not None
+            if residual is not None:
+                return out[0].view(shape), out[1].view(residual_shape)
+            return out.view(shape)
+        # Use aiter kernels when not compiling
+        if _use_aiter:
+            if residual is not None:
+                residual_out = torch.empty_like(x)
+                output = torch.empty_like(x)
+                aiter_fused_add_rms_norm(
+                    output,
+                    x,
+                    residual,
+                    residual_out,
+                    self.weight.data,
+                    self.variance_epsilon,
+                )
+                return output.view(shape), residual_out.view(residual_shape)
+            out = aiter_rms_norm(x, self.weight.data, self.variance_epsilon)
+            return out.view(shape)
+
+        # Fallback to native implementation
+        out = self.forward_native(x, residual)
+        if residual is not None:
+            return out[0].view(shape), out[1].view(residual_shape)
+        return out.view(shape)
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
@@ -309,8 +365,8 @@ class ScaleResidualLayerNormScaleShift(nn.Module):
         residual: torch.Tensor,
         x: torch.Tensor,
         gate: torch.Tensor | int,
-        shift: torch.Tensor,
-        scale: torch.Tensor,
+        shift: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply gated residual connection, followed by layernorm and
@@ -352,6 +408,10 @@ class ScaleResidualLayerNormScaleShift(nn.Module):
         #     scale,
         #     shift,
         # )
+        if shift is None and scale is None:
+            return normalized, residual_output
+
+        assert shift is not None and scale is not None, "shift and scale must be provided"
         modulated = fuse_scale_shift_kernel(
             normalized,
             scale,

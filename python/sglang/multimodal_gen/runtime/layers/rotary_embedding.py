@@ -524,7 +524,7 @@ class NDRotaryEmbedding(torch.nn.Module):
         # Apply sequence parallel sharding to the sizes and compute shard offset
         shard_sizes = list(sizes)
         shard_offsets = [0] * self.ndim
-        if sp_world_size > 1:
+        if sp_world_size > 1 and shard_dim >= 0:
             assert sizes[shard_dim] % sp_world_size == 0, (
                 f"Dimension {shard_dim} with size {sizes[shard_dim]} is not divisible "
                 f"by sequence parallel world size {sp_world_size}"
@@ -552,7 +552,7 @@ class NDRotaryEmbedding(torch.nn.Module):
             base_offset = starts[i]
             if i == 0 and start_frame > 0:
                 base_offset += start_frame
-            if sp_world_size > 1 and i == shard_dim:
+            if sp_world_size > 1 and shard_dim >= 0 and i == shard_dim:
                 base_offset += shard_offsets[i]
 
             gen_idx = self.dim_idx_to_gen_idx[i]

@@ -258,6 +258,8 @@ class ServerArgs:
     dp_degree: int = 1
     # cfg parallel
     enable_cfg_parallel: bool = False
+    # cfg batch (merge positive and negative prompts in single forward pass)
+    enable_cfg_batch: bool = False
 
     hsdp_replicate_dim: int = 1
     hsdp_shard_dim: int = -1
@@ -366,10 +368,14 @@ class ServerArgs:
             if self.vae_cpu_offload is None:
                 self.vae_cpu_offload = False
         else:
-            self.dit_cpu_offload = True
-            self.text_encoder_cpu_offload = True
-            self.image_encoder_cpu_offload = True
-            self.vae_cpu_offload = True
+            if self.dit_cpu_offload is None:
+                self.dit_cpu_offload = True
+            if self.text_encoder_cpu_offload is None:
+                self.text_encoder_cpu_offload = True
+            if self.image_encoder_cpu_offload is None:
+                self.image_encoder_cpu_offload = True
+            if self.vae_cpu_offload is None:
+                self.vae_cpu_offload = True
 
     def __post_init__(self):
         # configure logger before use
@@ -499,6 +505,12 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.enable_cfg_parallel,
             help="Enable cfg parallel.",
+        )
+        parser.add_argument(
+            "--enable-cfg-batch",
+            action="store_true",
+            default=ServerArgs.enable_cfg_batch,
+            help="Enable cfg batch (merge positive and negative prompts in single forward pass for better efficiency).",
         )
         parser.add_argument(
             "--data-parallel-size",
@@ -865,7 +877,9 @@ class ServerArgs:
             if self.enable_cfg_parallel:
                 num_gpus_per_group *= 2
             if self.num_gpus % num_gpus_per_group != 0:
-                raise ValueError(f"{self.num_gpus=} % {num_gpus_per_group} != 0")
+                raise ValueError(
+                    f"num_gpus={self.num_gpus} % {num_gpus_per_group} != 0"
+                )
             self.sp_degree = self.num_gpus // num_gpus_per_group
 
         if (
@@ -914,7 +928,9 @@ class ServerArgs:
             )
 
     def check_server_dp_args(self):
-        assert self.num_gpus % self.dp_size == 0, f"{self.num_gpus=}, {self.dp_size=}"
+        assert (
+            self.num_gpus % self.dp_size == 0
+        ), f"num_gpus={self.num_gpus}, dp_size={self.dp_size}"
         assert self.dp_size >= 1, "--dp-size must be natural number"
         # NOTE: disable temporarily
         # self.dp_degree = self.num_gpus // self.dp_size
@@ -932,10 +948,11 @@ class ServerArgs:
         if not envs.SGLANG_CACHE_DIT_ENABLED:
             # TODO: need a better way to tell this
             if "wan" in self.pipeline_config.__class__.__name__.lower():
+                self.dit_layerwise_offload = False
                 logger.info(
-                    "Automatically enable dit_layerwise_offload for Wan for best performance"
+                    "Automatically enable dit_layerwise_offload for Wan for best performance: %s",
+                    self.dit_layerwise_offload,
                 )
-                self.dit_layerwise_offload = True
 
         if self.dit_layerwise_offload:
             if self.use_fsdp_inference:
@@ -1000,6 +1017,13 @@ class ServerArgs:
                 raise ValueError(
                     "CFG Parallelism is enabled via `--enable-cfg-parallel`, while -num-gpus==1"
                 )
+
+        if self.enable_cfg_batch and self.enable_cfg_parallel:
+            raise ValueError(
+                "Cannot enable both CFG batch (--enable-cfg-batch) and CFG parallel (--enable-cfg-parallel) at the same time. "
+                "Please choose only one: use --enable-cfg-batch for merged batch inference, "
+                "or --enable-cfg-parallel for parallel CFG computation."
+            )
 
         if os.getenv("SGLANG_CACHE_DIT_ENABLED", "").lower() == "true":
             has_sp = self.sp_degree > 1

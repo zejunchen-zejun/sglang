@@ -10,7 +10,19 @@
    rocm/sgl-dev:v0.5.7-rocm700-mi35x-20260106
    ```
 
-2. Install zejun/sglang dev/perf branch:
+2. Install aiter dev/perf branch:
+   ```
+   pip uninstall aiter
+   git clone -b dev/perf git@github.com:ROCm/aiter.git
+   cd aiter
+   git submodule sync && git submodule update --init --recursive
+   # for MI308
+   GPU_ARCHS=gfx942 python3 setup.py install
+   # for MI355
+   GPU_ARCHS=gfx950 python3 setup.py install
+   ```
+
+3. Install zejun/sglang dev/perf branch:
    ```
    git clone -b Qwen-Image https://github.com/zejunchen-zejun/sglang.git
    cd sglang
@@ -19,7 +31,7 @@
    python3 setup_rocm.py install
    export PYTHONPATH=<you_sglang_path/sglang/python>
    ```
-3. Other requirements:
+4. Other requirements:
     ```
    pip install remote_pdb
    pip install imageio
@@ -205,6 +217,11 @@ sglang serve \
     --vae-precision bf16 \
     --host 0.0.0.0 \
     --port 30000 \
+    --dit-cpu-offload False \
+    --text-encoder-cpu-offload False \
+    --vae-cpu-offload False \
+    --image-encoder-cpu-offload False \
+    --use-fsdp-inference False \
     --enable-torch-compile
 ```
 
@@ -226,6 +243,7 @@ python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
     --height 1024 \
     --num-inference-steps 8 \
     --guidance-scale 1 \
+    --seed 42 \
     --profile
 ```
 If two images are used, guidance-scale needs to be set to 4.0.
