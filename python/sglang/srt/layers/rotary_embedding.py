@@ -1,6 +1,7 @@
 # Adapted from https://raw.githubusercontent.com/vllm-project/vllm/refs/tags/v0.6.6.post1/vllm/model_executor/layers/rotary_embedding.py
 
 """Rotary Positional Embeddings."""
+
 import itertools
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -22,6 +23,7 @@ from sglang.srt.utils import (
     is_npu,
     is_xpu,
 )
+import vllm._custom_ops as ops
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
@@ -119,9 +121,7 @@ class RotaryEmbedding(CustomOp):
             and not (_is_cpu and _is_cpu_amx_available)
             and not (_is_xpu)
         ):
-            from vllm._custom_ops import rotary_embedding
-
-            self.vllm_rotary_embedding = rotary_embedding
+            self.vllm_rotary_embedding = ops.rotary_embedding
 
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
@@ -2161,7 +2161,7 @@ class DualChunkRotaryEmbedding(CustomOp):
         self.local_size = local_size
         self.dtype = dtype
         self.device = torch.device(f"cuda:{torch.cuda.current_device()}")
-        (q_cache, qc_cache, k_cache, qc_no_clamp_cache, q_inter_cache) = (
+        q_cache, qc_cache, k_cache, qc_no_clamp_cache, q_inter_cache = (
             self._compute_cos_sin_cache()
         )
 
@@ -2618,6 +2618,7 @@ def apply_rotary_pos_emb_npu(
     k_embed = k_embed.squeeze(0)
     return q_embed, k_embed
 
+
 def apply_rotary_pos_emb_aiter(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2625,16 +2626,11 @@ def apply_rotary_pos_emb_aiter(
     sin: torch.Tensor,
     unsqueeze_dim=1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if (
-        q.dim() != 3
-        or k.dim() != 3
-        or cos.dim() != 2
-        or sin.dim() != 2
-    ):
+    if q.dim() != 3 or k.dim() != 3 or cos.dim() != 2 or sin.dim() != 2:
         print(
             f"q shape {q.shape} or k shape {k.shape} or cos shape {cos.shape} or sin shape {sin.shape} not valid for aiter"
             f"fallback to native"
-        )       
+        )
         return apply_rotary_pos_emb_native(q, k, cos, sin, unsqueeze_dim)
     T, B, H = q.shape
     q = q.view(T, 1, B, H)
@@ -2646,6 +2642,7 @@ def apply_rotary_pos_emb_aiter(
     k_embed = k_embed.view(T, B, H)
 
     return q_embed, k_embed
+
 
 if _is_npu:
     apply_rotary_pos_emb = apply_rotary_pos_emb_npu
