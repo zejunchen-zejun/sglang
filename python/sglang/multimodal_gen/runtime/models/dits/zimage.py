@@ -4,21 +4,17 @@ from typing import Any, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from sglang.jit_kernel.norm import can_use_fused_inplace_qknorm
 from sglang.multimodal_gen.configs.models.dits.zimage import ZImageDitConfig
 from sglang.multimodal_gen.runtime.layers.activation import SiluAndMul
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
-from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm, apply_qk_norm
+from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
-from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
-    _apply_rotary_emb,
-    apply_flashinfer_rope_qk_inplace,
-)
+from sglang.multimodal_gen.runtime.layers.triton_ops import apply_rotary_embedding
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
@@ -155,40 +151,17 @@ class ZImageAttention(nn.Module):
         k = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
         v = v.view(*v.shape[:-1], self.num_kv_heads, self.head_dim)
 
+        # Apply QK normalization
         if self.qk_norm:
-            if (
-                q.is_cuda
-                and (self.norm_q.variance_epsilon == self.norm_k.variance_epsilon)
-                and can_use_fused_inplace_qknorm(self.head_dim)
-            ):
-                q, k = apply_qk_norm(
-                    q=q,
-                    k=k,
-                    q_norm=self.norm_q,
-                    k_norm=self.norm_k,
-                    head_dim=self.head_dim,
-                    allow_inplace=True,
-                )
-            else:
-                q = self.norm_q(q)
-                k = self.norm_k(k)
+            q = self.norm_q(q)
+            k = self.norm_k(k)
 
+        # Apply RoPE
         if freqs_cis is not None:
             cos, sin = freqs_cis
-            if q.is_cuda and q.shape == k.shape:
-                cos_sin_cache = torch.cat(
-                    [
-                        cos.to(dtype=torch.float32).contiguous(),
-                        sin.to(dtype=torch.float32).contiguous(),
-                    ],
-                    dim=-1,
-                )
-                q, k = apply_flashinfer_rope_qk_inplace(
-                    q, k, cos_sin_cache, is_neox=False
-                )
-            else:
-                q = _apply_rotary_emb(q, cos, sin, is_neox_style=False)
-                k = _apply_rotary_emb(k, cos, sin, is_neox_style=False)
+            # Use Triton apply_rotary_embedding directly (interleaved=True for is_neox=False)
+            q = apply_rotary_embedding(q, cos, sin, interleaved=True)
+            k = apply_rotary_embedding(k, cos, sin, interleaved=True)
 
         hidden_states = self.attn(q, k, v)
         hidden_states = hidden_states.flatten(2)
@@ -642,3 +615,4 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
 
 
 EntryClass = ZImageTransformer2DModel
+
