@@ -32,6 +32,10 @@ from sglang.multimodal_gen.runtime.managers.forward_context import (
 )
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.utils import get_compute_dtype
+from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
+    NDRotaryEmbedding,
+    _apply_rotary_emb,
+)
 
 
 class UlyssesAttention(nn.Module):
@@ -346,6 +350,8 @@ class USPAttention(nn.Module):
         replicated_q: torch.Tensor | None = None,
         replicated_k: torch.Tensor | None = None,
         replicated_v: torch.Tensor | None = None,
+        freqs_cis: torch.Tensor | None = None,
+        is_neox_style: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass for USPAttention.
@@ -385,6 +391,11 @@ class USPAttention(nn.Module):
                 dropout_p=self.dropout_p,
             )
         else:
+            if freqs_cis is not None:
+                cos, sin = freqs_cis
+                q, k = _apply_rotary_emb(
+                    q, cos, sin, is_neox_style=is_neox_style
+                ), _apply_rotary_emb(k, cos, sin, is_neox_style=is_neox_style)
             # -> [B, S, H_local, D]
             out = self.attn_impl.forward(q, k, v, ctx_attn_metadata)
 
