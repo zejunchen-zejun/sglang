@@ -1,24 +1,34 @@
 import math
+import os
 from typing import Any, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
+from sglang.jit_kernel.norm import can_use_fused_inplace_qknorm
 from sglang.multimodal_gen.configs.models.dits.zimage import ZImageDitConfig
 from sglang.multimodal_gen.runtime.layers.activation import SiluAndMul
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
-from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
+from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm, apply_qk_norm
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
-from sglang.multimodal_gen.runtime.layers.triton_ops import apply_rotary_embedding
+from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
+    _apply_rotary_emb,
+)
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+
+try:
+    import aiter
+    AITER_AVAILABLE = True
+except ImportError:
+    AITER_AVAILABLE = False
 
 logger = init_logger(__name__)
 
@@ -138,6 +148,38 @@ class ZImageAttention(nn.Module):
             causal=False,
         )
 
+    @staticmethod
+    @torch.compiler.disable
+    def _call_fused_rope_rms(
+        qkv: torch.Tensor,
+        norm_q_weight: torch.Tensor,
+        norm_k_weight: torch.Tensor,
+        cos_sin: torch.Tensor,
+        positions: torch.Tensor,
+        num_tokens: int,
+        num_heads_q: int,
+        num_heads_k: int,
+        num_heads_v: int,
+        head_dim: int,
+        is_neox_style: bool,
+        eps: float,
+    ) -> None:
+        """Wrapper for aiter.fused_rope_rms to prevent torch.compile decomposition."""
+        aiter.fused_rope_rms(
+            qkv,
+            norm_q_weight,
+            norm_k_weight,
+            cos_sin,
+            positions,
+            num_tokens,
+            num_heads_q,
+            num_heads_k,
+            num_heads_v,
+            head_dim,
+            is_neox_style,
+            eps,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -147,21 +189,79 @@ class ZImageAttention(nn.Module):
         k, _ = self.to_k(hidden_states)
         v, _ = self.to_v(hidden_states)
 
-        q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        k = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        v = v.view(*v.shape[:-1], self.num_kv_heads, self.head_dim)
-
-        # Apply QK normalization
-        if self.qk_norm:
-            q = self.norm_q(q)
-            k = self.norm_k(k)
-
-        # Apply RoPE
-        if freqs_cis is not None:
+        # Check if we should use aiter's fused_rope_rms kernel based on environment variable
+        use_aiter_fused = (
+            os.environ.get("SGLANG_USE_AITER", "0") == "1"
+            and AITER_AVAILABLE
+            and self.qk_norm
+            and freqs_cis is not None
+            and hidden_states.is_cuda
+        )
+        
+        if use_aiter_fused:
+            # Pack QKV for aiter.fused_rope_rms
+            # Input shape: q [B, L, num_heads*head_dim], k [B, L, num_kv_heads*head_dim], v [B, L, num_kv_heads*head_dim]
+            B, L = hidden_states.shape[0], hidden_states.shape[1]
+            num_tokens = B * L
+            
+            # Concatenate Q, K, V: [B, L, (Hq*D + Hkv*D + Hkv*D)]
+            qkv = torch.cat([q, k, v], dim=-1)
+            # Reshape to [num_tokens, num_heads_total, head_dim]
+            qkv = qkv.view(num_tokens, self.num_heads + 2 * self.num_kv_heads, self.head_dim).contiguous()
+            
+            # Prepare cos_sin for aiter
             cos, sin = freqs_cis
-            # Use Triton apply_rotary_embedding directly (interleaved=True for is_neox=False)
-            q = apply_rotary_embedding(q, cos, sin, interleaved=True)
-            k = apply_rotary_embedding(k, cos, sin, interleaved=True)
+            # aiter expects [max_positions, head_dim] where we concat cos and sin
+            # CRITICAL: Convert to same dtype as qkv (usually bfloat16) to avoid dtype mismatch
+            cos_sin = torch.cat([cos, sin], dim=-1).to(qkv.dtype).contiguous()
+            
+            # Create position tensor - for batched input, each sequence gets positions [0, 1, 2, ..., L-1]
+            positions = torch.arange(L, device=hidden_states.device, dtype=torch.int64).repeat(B)
+            
+            # Call aiter's fused kernel (INPLACE modification of qkv)
+            self._call_fused_rope_rms(
+                qkv,
+                self.norm_q.weight,
+                self.norm_k.weight,
+                cos_sin,
+                positions,
+                num_tokens,
+                self.num_heads,
+                self.num_kv_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                False,
+                self.norm_q.variance_epsilon,
+            )
+            
+            # Unpack QKV after fusion
+            q_size = self.num_heads * self.head_dim
+            k_size = self.num_kv_heads * self.head_dim
+            v_size = self.num_kv_heads * self.head_dim
+            qkv_flat = qkv.view(num_tokens, q_size + k_size + v_size)
+            q, k, v = qkv_flat.split([q_size, k_size, v_size], dim=-1)
+            
+            # Reshape back to [B, L, num_heads, head_dim]
+            q = q.view(B, L, self.num_heads, self.head_dim)
+            k = k.view(B, L, self.num_kv_heads, self.head_dim)
+            v = v.view(B, L, self.num_kv_heads, self.head_dim)
+        else:
+            # Fallback to original implementation: separate QK norm and RoPE
+            q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
+            k = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
+            v = v.view(*v.shape[:-1], self.num_kv_heads, self.head_dim)
+
+            # Apply QK normalization
+            if self.qk_norm:
+                q = self.norm_q(q)
+                k = self.norm_k(k)
+
+            # Apply RoPE
+            if freqs_cis is not None:
+                cos, sin = freqs_cis
+                q, k = _apply_rotary_emb(
+                    q, cos, sin, is_neox_style=False
+                ), _apply_rotary_emb(k, cos, sin, is_neox_style=False)
 
         hidden_states = self.attn(q, k, v)
         hidden_states = hidden_states.flatten(2)
