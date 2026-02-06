@@ -18,6 +18,7 @@ from sglang.multimodal_gen.runtime.layers.linear import (
 )
 from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
     _apply_rotary_emb,
+    apply_flashinfer_rope_qk_inplace,
 )
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import current_platform
@@ -184,23 +185,17 @@ class ZImageAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         freqs_cis: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        aiter_prepared: Optional[dict] = None,
     ):
         q, _ = self.to_q(hidden_states)
         k, _ = self.to_k(hidden_states)
         v, _ = self.to_v(hidden_states)
 
-        # Check if we should use aiter's fused_rope_rms kernel based on environment variable
-        use_aiter_fused = (
-            os.environ.get("SGLANG_USE_AITER", "0") == "1"
-            and AITER_AVAILABLE
-            and self.qk_norm
-            and freqs_cis is not None
-            and hidden_states.is_cuda
-        )
+        # Check if aiter parameters are pre-prepared (from outer layer)
+        use_aiter_fused = aiter_prepared is not None
         
         if use_aiter_fused:
-            # Pack QKV for aiter.fused_rope_rms
-            # Input shape: q [B, L, num_heads*head_dim], k [B, L, num_kv_heads*head_dim], v [B, L, num_kv_heads*head_dim]
+            # Use pre-prepared parameters to avoid redundant computation
             B, L = hidden_states.shape[0], hidden_states.shape[1]
             num_tokens = B * L
             
@@ -209,14 +204,9 @@ class ZImageAttention(nn.Module):
             # Reshape to [num_tokens, num_heads_total, head_dim]
             qkv = qkv.view(num_tokens, self.num_heads + 2 * self.num_kv_heads, self.head_dim).contiguous()
             
-            # Prepare cos_sin for aiter
-            cos, sin = freqs_cis
-            # aiter expects [max_positions, head_dim] where we concat cos and sin
-            # CRITICAL: Convert to same dtype as qkv (usually bfloat16) to avoid dtype mismatch
-            cos_sin = torch.cat([cos, sin], dim=-1).to(qkv.dtype).contiguous()
-            
-            # Create position tensor - for batched input, each sequence gets positions [0, 1, 2, ..., L-1]
-            positions = torch.arange(L, device=hidden_states.device, dtype=torch.int64).repeat(B)
+            # Convert cos_sin to match qkv dtype (done once per layer now)
+            cos_sin = aiter_prepared['cos_sin'].to(qkv.dtype)
+            positions = aiter_prepared['positions']
             
             # Call aiter's fused kernel (INPLACE modification of qkv)
             self._call_fused_rope_rms(
@@ -252,9 +242,8 @@ class ZImageAttention(nn.Module):
             v = v.view(*v.shape[:-1], self.num_kv_heads, self.head_dim)
 
             # Apply QK normalization
-            if self.qk_norm:
-                q = self.norm_q(q)
-                k = self.norm_k(k)
+            q = self.norm_q(q)
+            k = self.norm_k(k)
 
             # Apply RoPE
             if freqs_cis is not None:
@@ -314,6 +303,7 @@ class ZImageTransformerBlock(nn.Module):
         x: torch.Tensor,
         freqs_cis: Tuple[torch.Tensor, torch.Tensor],
         adaln_input: Optional[torch.Tensor] = None,
+        aiter_prepared: Optional[dict] = None,
     ):
         if self.modulation:
             assert adaln_input is not None
@@ -328,6 +318,7 @@ class ZImageTransformerBlock(nn.Module):
             attn_out = self.attention(
                 self.attention_norm1(x) * scale_msa,
                 freqs_cis=freqs_cis,
+                aiter_prepared=aiter_prepared,
             )
             x = x + gate_msa * self.attention_norm2(attn_out)
 
@@ -342,6 +333,7 @@ class ZImageTransformerBlock(nn.Module):
             attn_out = self.attention(
                 self.attention_norm1(x),
                 freqs_cis=freqs_cis,
+                aiter_prepared=aiter_prepared,
             )
             x = x + self.attention_norm2(attn_out)
 
@@ -683,8 +675,24 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
 
         x = x.unsqueeze(0)
         x_freqs_cis = x_freqs_cis
+        
+        # Pre-prepare aiter parameters (done once for all layers)
+        use_aiter = (
+            os.environ.get("SGLANG_USE_AITER", "0") == "1"
+            and AITER_AVAILABLE
+            and x.is_cuda
+        )
+        x_aiter_prepared = None
+        if use_aiter and x_freqs_cis is not None:
+            cos, sin = x_freqs_cis
+            B, L = x.shape[0], x.shape[1]
+            x_aiter_prepared = {
+                'cos_sin': torch.cat([cos, sin], dim=-1).contiguous(),
+                'positions': torch.arange(L, device=x.device, dtype=torch.int64).repeat(B),
+            }
+        
         for layer in self.noise_refiner:
-            x = layer(x, x_freqs_cis, adaln_input)
+            x = layer(x, x_freqs_cis, adaln_input, aiter_prepared=x_aiter_prepared)
 
         cap_feats = torch.cat(cap_feats, dim=0)
 
@@ -693,17 +701,38 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         cap_freqs_cis = freqs_cis[0]
 
         cap_feats = cap_feats.unsqueeze(0)
+        
+        # Pre-prepare aiter parameters for caption features
+        cap_aiter_prepared = None
+        if use_aiter and cap_freqs_cis is not None:
+            cos, sin = cap_freqs_cis
+            B, L = cap_feats.shape[0], cap_feats.shape[1]
+            cap_aiter_prepared = {
+                'cos_sin': torch.cat([cos, sin], dim=-1).contiguous(),
+                'positions': torch.arange(L, device=cap_feats.device, dtype=torch.int64).repeat(B),
+            }
+        
         for layer in self.context_refiner:
-            cap_feats = layer(cap_feats, cap_freqs_cis)
+            cap_feats = layer(cap_feats, cap_freqs_cis, aiter_prepared=cap_aiter_prepared)
 
         unified = torch.cat([x, cap_feats], dim=1)
         unified_freqs_cis = (
             torch.cat([x_freqs_cis[0], cap_freqs_cis[0]], dim=0),
             torch.cat([x_freqs_cis[1], cap_freqs_cis[1]], dim=0),
         )
+        
+        # Pre-prepare aiter parameters for unified layers
+        unified_aiter_prepared = None
+        if use_aiter and unified_freqs_cis is not None:
+            cos, sin = unified_freqs_cis
+            B, L = unified.shape[0], unified.shape[1]
+            unified_aiter_prepared = {
+                'cos_sin': torch.cat([cos, sin], dim=-1).contiguous(),
+                'positions': torch.arange(L, device=unified.device, dtype=torch.int64).repeat(B),
+            }
 
         for layer in self.layers:
-            unified = layer(unified, unified_freqs_cis, adaln_input)
+            unified = layer(unified, unified_freqs_cis, adaln_input, aiter_prepared=unified_aiter_prepared)
 
         unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](
             unified, adaln_input
