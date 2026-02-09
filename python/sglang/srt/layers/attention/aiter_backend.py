@@ -575,12 +575,7 @@ class AiterAttnBackend(AttentionBackend):
             (reduce_partial_map_size, reduce_partial_map_type),
         ) = get_pa_metadata_info_v1(
             batch_size,
-            max_qlen,
-            tp_q_head_num,
-            self.q_dtype,
-            kv_dtype_for_metadata,
-            is_sparse=0,  # 0 for non-sparse attention
-            fast_mode=True,
+            max_qlen
         )
         # Allocate metadata buffers with reuse optimization for multi-layer forward passes
         self._allocate_pa_metadata_buffers(
@@ -734,12 +729,7 @@ class AiterAttnBackend(AttentionBackend):
                 (reduce_partial_map_size, reduce_partial_map_type),
             ) = get_pa_metadata_info_v1(
                 max_bs,
-                max_qlen,
-                self.num_head,  # Use self.num_head as default tp_q_head_num
-                self.q_dtype,
-                kv_dtype_for_metadata,
-                is_sparse=0,
-                fast_mode=True,
+                max_qlen
             )
             
             # Pre-allocate buffers with maximum size for CUDA graph compatibility

@@ -434,11 +434,14 @@ class Qwen3MoeAttention(nn.Module):
             elif hasattr(forward_batch.token_to_kv_pool, 'page_size'):
                 block_size = forward_batch.token_to_kv_pool.page_size
             x = 16 // k_buffer.element_size()
+            # Create tensor scales instead of float values
+            k_scale_tensor = torch.tensor(1.0, dtype=torch.float32, device=k_buffer.device)
+            v_scale_tensor = torch.tensor(1.0, dtype=torch.float32, device=v_buffer.device)
             aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
                 kv_cache = (k_buffer, v_buffer),
                 cache_loc = forward_batch.out_cache_loc,
-                k_scale = 1.0,
-                v_scale = 1.0,
+                k_scale = k_scale_tensor,
+                v_scale = v_scale_tensor,
                 return_kv = False,
                 use_shuffle_layout = True,
                 block_size = block_size,
@@ -462,16 +465,16 @@ class Qwen3MoeAttention(nn.Module):
                 positions,
                 q,
                 k,
-                fused_set_kv_buffer_arg=(
-                    create_fused_set_kv_buffer_arg(
-                        value=v,
-                        layer=self.attn,
-                        forward_batch=forward_batch,
-                    )
-                    if enable_fused_set_kv_buffer(forward_batch)
-                    and self.compatible_with_fused_kv_buffer
-                    else None
-                ),
+                # fused_set_kv_buffer_arg=(
+                #     create_fused_set_kv_buffer_arg(
+                #         value=v,
+                #         layer=self.attn,
+                #         forward_batch=forward_batch,
+                #     )
+                #     if enable_fused_set_kv_buffer(forward_batch)
+                #     and self.compatible_with_fused_kv_buffer
+                #     else None
+                # ),
             )
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
