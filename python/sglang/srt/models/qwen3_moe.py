@@ -435,8 +435,8 @@ class Qwen3MoeAttention(nn.Module):
                 block_size = forward_batch.token_to_kv_pool.page_size
             x = 16 // k_buffer.element_size()
             # Create tensor scales instead of float values
-            k_scale_tensor = torch.tensor(1.0, dtype=torch.float32, device=k_buffer.device)
-            v_scale_tensor = torch.tensor(1.0, dtype=torch.float32, device=v_buffer.device)
+            k_scale_tensor = torch.tensor(1.0, dtype=torch.float32, device="cpu")
+            v_scale_tensor = torch.tensor(1.0, dtype=torch.float32, device="cpu")
             aiter_fused_set_kv_buffer_arg = AiterFusedSetKVBufferArg(
                 kv_cache = (k_buffer, v_buffer),
                 cache_loc = forward_batch.out_cache_loc,
