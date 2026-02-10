@@ -458,9 +458,12 @@ class AiterAttnBackend(AttentionBackend):
                 if seq_lens_cpu is None:
                     seq_lens_cpu = forward_batch.seq_lens.cpu()
                 max_seq_pages = (seq_lens_cpu.max().item() + self.page_size - 1) // self.page_size + 1
-                self.forward_metadata.page_table = (
+                bs = forward_batch.batch_size
+                page_table_data = (
                     self.forward_metadata.page_table[:, self.strided_indices[:max_seq_pages]] // self.page_size
                 )
+                self.page_table[:bs, :max_seq_pages] = page_table_data
+                self.forward_metadata.page_table = self.page_table[:bs, :max_seq_pages]
             self._build_pa_metadata_for_prefill(forward_batch.batch_size)
 
     def _allocate_pa_metadata_buffers(
@@ -663,13 +666,13 @@ class AiterAttnBackend(AttentionBackend):
         The metadata is computed once per forward pass and reused across all layers.
         """
         block_size = self.page_size
-        context_lens = self.forward_metadata.kv_lens
+        context_lens = self.forward_metadata.kv_lens.int()
         num_blocks_per_seq = (context_lens + block_size - 1) // block_size
 
         # Page-level kv_indptr (reuse pa_kv_indptr buffer)
         pages_kv_indptr = self.pa_kv_indptr[: batch_size + 1]
         pages_kv_indptr[1 : batch_size + 1] = torch.cumsum(num_blocks_per_seq, dim=0)
-        
+
         # Build kv_indices from page_table using triton kernel
         page_table = self.forward_metadata.page_table
         create_flashinfer_kv_indices_triton[(batch_size,)](
@@ -1435,32 +1438,11 @@ class AiterIndicesUpdaterPrefill:
             kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)
             kv_indptr = kv_indptr[: bs + 1]
 
-            # (TODO: Kk) WA - CI test_moe_eval_accuracy_large.py
-            # mha_batch_prefill reads 128 data to do computatoin
-            # if real data is not long enough then original padding value 0 is used
-            # but the 0 location will be made nan (noqa) in cuda graph capture mode
-            # this will cause the output tensor value becomes nan
-            # WA is to assure that last index of pool not changed
-            kv_indices = torch.empty(
-                paged_kernel_lens_sum + 256,
-                dtype=torch.int32,
-                device=req_pool_indices.device,
-            )
-            create_flashinfer_kv_indices_triton[(bs,)](
-                self.req_to_token,
-                req_pool_indices,
-                paged_kernel_lens,
-                kv_indptr,
-                kv_start_idx,
-                kv_indices,
-                self.req_to_token.shape[1],
-            )
-            if seq_lens_cpu is None:
-                token_num = kv_indptr[-1]
-                kv_indices[token_num:] = kv_indices[0]
-            else:
-                token_num = torch.cumsum(seq_lens_cpu, dim=0)[-1]
-                kv_indices[token_num:] = kv_indices[0]
+            # Skip token-level kv_indices computation for non-MLA:
+            # forward_extend (non-MLA) uses page-level indices from _build_pa_metadata_for_prefill,
+            # NOT the token-level kv_indices computed here. Skipping avoids a redundant
+            # tensor allocation + Triton kernel launch per prefill step.
+            kv_indices = None
 
             if seq_lens_cpu is None:
                 self.max_kv_len = torch.max(paged_kernel_lens).item()
