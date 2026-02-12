@@ -404,7 +404,42 @@ class GroupCoordinator:
             self.mq_broadcaster = MessageQueue.create_from_process_group(
                 self.cpu_group, 1 << 22, 6
             )
-        if _use_aiter:
+        self._aiter_group = None
+        if _use_aiter and self.world_size > 1:
+            from aiter.dist.parallel_state import (
+                GroupCoordinator as AiterGroupCoordinator,
+                _groups as _aiter_groups,
+            )
+            from aiter.dist.device_communicators.communicator_cuda import (
+                CudaCommunicator as AiterCudaCommunicator,
+            )
+
+            # Create an aiter CudaCommunicator with the same process groups
+            aiter_device_comm = AiterCudaCommunicator(
+                cpu_group=self.cpu_group,
+                device=self.device,
+                device_group=self.device_group,
+                unique_name=self.unique_name,
+            )
+
+            # Create an aiter GroupCoordinator without calling __init__
+            # to avoid creating duplicate torch distributed process groups
+            aiter_group = object.__new__(AiterGroupCoordinator)
+            aiter_group.unique_name = self.unique_name
+            aiter_group.device_communicator = aiter_device_comm
+            aiter_group.world_size = self.world_size
+            aiter_group.rank = self.rank
+            aiter_group.ranks = self.ranks
+            aiter_group.rank_in_group = self.rank_in_group
+            aiter_group.cpu_group = self.cpu_group
+            aiter_group.device_group = self.device_group
+            aiter_group.device = self.device
+
+            # Register in aiter's group registry so fused ops can find it
+            _aiter_groups[self.unique_name] = weakref.ref(aiter_group)
+
+            # Keep references to prevent garbage collection
+            self._aiter_group = aiter_group
             from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as AiterCustomAllreduce            
             self._aiter_ca_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
@@ -635,6 +670,31 @@ class GroupCoordinator:
             symm_mem_comm.all_reduce(input_)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
+
+    if _use_aiter:
+        def fused_allreduce_rmsnorm(
+            self,
+            input_: torch.Tensor,
+            residual_inp_: torch.Tensor,
+            weight_: torch.Tensor,
+            eps: float,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            from aiter.dist.parallel_state import fused_allreduce_rmsnorm_
+            return fused_allreduce_rmsnorm_(
+                input_, residual_inp_, weight_, eps, group_name=self.unique_name
+            )
+
+        def fused_allreduce_rmsnorm_quant(
+            self,
+            input_: torch.Tensor,
+            residual_inp_: torch.Tensor,
+            weight_: torch.Tensor,
+            eps: float,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            from aiter.dist.parallel_state import fused_allreduce_rmsnorm_quant_
+            return fused_allreduce_rmsnorm_quant_(
+                input_, residual_inp_, weight_, eps, group_name=self.unique_name
+            )
 
     def reduce_scatter_tensor(
         self,
