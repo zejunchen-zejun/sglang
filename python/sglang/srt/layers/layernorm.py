@@ -257,31 +257,24 @@ class RMSNorm(CustomOp):
             from sglang.srt.distributed import get_tensor_model_parallel_world_size
 
             if _use_aiter:
-                from sglang.srt.layers.aiter_comm_fusion import (
-                    aiter_allreduce_residual_rmsnorm,
+                from sglang.srt.distributed.communication_op import (
+                    tensor_model_parallel_fused_allreduce_rmsnorm,
+                    tensor_model_parallel_fused_allreduce_rmsnorm_quant,
                 )
-
-                fused_op = (
-                    torch.ops.sglang.aiter_allreduce_residual_rmsnorm
-                    if supports_custom_op()
-                    else aiter_allreduce_residual_rmsnorm
+                fp8_out = "fp8_e4m3fnuz" in quant_format
+                fused_op = tensor_model_parallel_fused_allreduce_rmsnorm_quant if fp8_out else tensor_model_parallel_fused_allreduce_rmsnorm
+                fused_result = fused_op(
+                    input_=x,
+                    residual_inp_=residual,
+                    weight_=self.weight,
+                    eps=self.variance_epsilon,
                 )
-
-                if get_tensor_model_parallel_world_size() > 1:
-                    fp8_out = "fp8_e4m3fnuz" in quant_format
-                    fused_result = fused_op(
-                        allreduce_in=x,
-                        residual_in=residual,
-                        rms_weight=self.weight,
-                        eps=self.variance_epsilon,
-                        fp8_out=fp8_out,
-                    )
-                    residual_out, norm_out, scale_out = fused_result
-                    if norm_out is not None:
-                        # If fp8 quantization is applied, return quantized output with scale
-                        if fp8_out and scale_out is not None:
-                            return (norm_out, scale_out), residual_out
-                        return norm_out, residual_out
+                if fp8_out:
+                    norm_out, residual_out, scale_out = fused_result
+                    return (norm_out, scale_out), residual_out
+                else:
+                    norm_out, residual_out = fused_result
+                    return norm_out, residual_out
             else:
                 from sglang.srt.layers.flashinfer_comm_fusion import (
                     flashinfer_allreduce_residual_rmsnorm,
