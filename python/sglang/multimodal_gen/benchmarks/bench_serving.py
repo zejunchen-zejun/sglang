@@ -10,7 +10,7 @@ Usage:
 
     # With profiling:
     python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
-         --backend sglang-image --dataset vbench --task ti2i --num-prompts 5 --profile
+         --backend sglang-image --dataset vbench --task image-to-image --num-prompts 5 --profile
 
     # benchmark it and make sure the port is the same as the server's port
     python3 -m sglang.multimodal_gen.benchmarks.bench_serving --dataset vbench --num-prompts 20 --port 1231
@@ -740,7 +740,14 @@ async def benchmark(args):
     except Exception as e:
         logger.info(f"Failed to fetch model info: {e}. Using default: {args.model}")
 
-    task_name = model_info(args.model).pipeline_tag
+    try:
+        task_name = model_info(args.model).pipeline_tag
+    except Exception:
+        logger.info(
+            f"Could not fetch pipeline_tag from HuggingFace for '{args.model}'. "
+            f"Using task from args: {args.task}"
+        )
+        task_name = args.task
 
     if args.task != task_name:
         logger.warning(
