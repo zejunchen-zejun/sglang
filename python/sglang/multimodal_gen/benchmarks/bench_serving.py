@@ -10,7 +10,7 @@ Usage:
 
     # With profiling:
     python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
-         --backend sglang-image --dataset vbench --task ti2i --num-prompts 5 --profile
+         --backend sglang-image --dataset vbench --task image-to-image --num-prompts 5 --profile
 
     # benchmark it and make sure the port is the same as the server's port
     python3 -m sglang.multimodal_gen.benchmarks.bench_serving --dataset vbench --num-prompts 20 --port 1231
@@ -763,8 +763,15 @@ async def benchmark(args):
             task_name = "text-to-image"
             logger.info(f"No config.json found, defaulting task to: {task_name}")
     else:
-        task_name = model_info(args.model).pipeline_tag
-        logger.info(f"Inferred task from HuggingFace pipeline_tag: {task_name}")
+        try:
+            task_name = model_info(args.model).pipeline_tag
+            logger.info(f"Inferred task from HuggingFace pipeline_tag: {task_name}")
+        except Exception:
+            logger.info(
+                f"Could not fetch pipeline_tag from HuggingFace for '{args.model}'. "
+                f"Using task from args: {args.task}"
+            )
+            task_name = args.task
 
     if task_name not in valid_tasks:
         raise ValueError(

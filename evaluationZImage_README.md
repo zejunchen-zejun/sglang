@@ -142,10 +142,85 @@ sglang generate "${SERVER_ARGS[@]}" "${SAMPLING_ARGS[@]}"
 
 Once the generation task has finished, the server will shut down automatically and the image will be saved to `z_image_output/z_image_result.png`.
 
-# Online Server (WIP)
+# Online Server
 
+Start the SGLang diffusion server with the Z-Image-Turbo model:
 
-# Evaluation (WIP)
+```bash
+sglang serve --model-path Tongyi-MAI/Z-Image-Turbo \
+  --num-gpus 1 \
+  --ulysses-degree 1 \
+  --host 0.0.0.0 \
+  --port 40000
+```
 
-Evaluation scripts and metrics are under development.
+For local model paths (e.g. pre-downloaded weights), point `--model-path` to the directory:
 
+```bash
+sglang serve --model-path /path/to/Z-Image-Turbo \
+  --num-gpus 1 \
+  --ulysses-degree 1 \
+  --host 0.0.0.0 \
+  --port 40000
+```
+
+# Evaluation
+
+## Online Benchmark
+
+Once the server is running, evaluate with the benchmark script:
+
+```bash
+python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
+  --backend sglang-image \
+  --task text-to-image \
+  --port 40000 \
+  --dataset vbench \
+  --num-prompts 10 \
+  --max-concurrency 1 \
+  --width 1280 \
+  --height 720 \
+  --num-inference-steps 9 \
+  --guidance-scale 0.0
+```
+
+Key arguments:
+
+| Argument | Description |
+| --- | --- |
+| `--task` | Generation task: `text-to-image`, `image-to-image`, `text-to-video`, `image-to-video`, `video-to-video`. When the model is loaded from a local path, `--task` is required because the HuggingFace `pipeline_tag` cannot be inferred automatically. |
+| `--dataset` | Dataset source: `vbench` or `random` |
+| `--dataset-path` | Path to a local dataset directory (optional) |
+| `--num-prompts` | Number of prompts to benchmark |
+| `--max-concurrency` | Maximum concurrent requests |
+| `--width` / `--height` | Output resolution |
+| `--num-inference-steps` | Number of denoising steps |
+| `--guidance-scale` | Classifier-free guidance scale |
+
+## Image-to-Image (Qwen-Image-Edit)
+
+For Qwen-Image-Edit evaluation, launch with the image editing model:
+
+```bash
+sglang serve --model-path Qwen/Qwen-Image-Edit-2511 \
+  --num-gpus 1 \
+  --host 0.0.0.0 \
+  --port 40000
+```
+
+Then benchmark:
+
+```bash
+python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
+  --backend sglang-image \
+  --task image-to-image \
+  --port 40000 \
+  --dataset vbench \
+  --dataset-path /path/to/benchmark_data \
+  --num-prompts 5 \
+  --max-concurrency 1 \
+  --width 768 \
+  --height 1024 \
+  --num-inference-steps 40 \
+  --guidance-scale 4
+```
