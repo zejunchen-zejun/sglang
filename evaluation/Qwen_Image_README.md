@@ -207,6 +207,11 @@ export SGLANG_PROFILE_WITH_STACK=1
 export SGLANG_PROFILE_RECORD_SHAPES=1
 export CUDA_VISIBLE_DEVICES=0,1
 export SGLANG_CACHE_DIT_ENABLED=false
+# Disable inductor autotune to avoid per-request kernel benchmarking overhead
+export SGLANG_TORCH_COMPILE_MODE=reduce-overhead
+export TORCHINDUCTOR_MAX_AUTOTUNE=0
+export TORCHINDUCTOR_MAX_AUTOTUNE_GEMM=0
+export TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=0
 
 sglang serve \
     --model-path /mnt/raid0/pretrained_model/Qwen-Image-Edit \
@@ -233,7 +238,7 @@ export PYTHONPATH=/path/to/sglang/python
 
 python3 -m sglang.multimodal_gen.benchmarks.bench_serving \
     --backend sglang-image \
-    --task ti2i \
+    --task image-to-image \
     --port 30000 \
     --dataset vbench \
     --dataset-path /home/yajizhan/dev/benchmark_data \

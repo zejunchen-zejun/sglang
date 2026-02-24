@@ -842,6 +842,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens = torch.cat(cu_window_seqlens_list, dim=0)
         return window_index, cu_window_seqlens
 
+    @torch.compiler.disable
     def forward(
         self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
     ) -> torch.Tensor:
@@ -962,6 +963,7 @@ class Qwen2_5_VLModel(nn.Module):
     def get_decoder(self):
         return self.language_model
 
+    @torch.compiler.disable
     def get_rope_index(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1190,6 +1192,7 @@ class Qwen2_5_VLModel(nn.Module):
 
             return position_ids, mrope_position_deltas
 
+    @torch.compiler.disable
     def get_video_features(
         self,
         pixel_values_videos: torch.FloatTensor,
@@ -1211,6 +1214,7 @@ class Qwen2_5_VLModel(nn.Module):
         video_embeds = torch.tensor_split(video_embeds, split_indices)
         return video_embeds
 
+    @torch.compiler.disable
     def get_image_features(
         self,
         pixel_values: torch.FloatTensor,
@@ -1232,6 +1236,7 @@ class Qwen2_5_VLModel(nn.Module):
         image_embeds = torch.tensor_split(image_embeds, split_indices)
         return image_embeds
 
+    @torch.compiler.disable
     def get_placeholder_mask(
         self,
         input_ids: torch.LongTensor,
