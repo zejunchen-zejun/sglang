@@ -104,7 +104,7 @@ class ImageEncodingStage(PipelineStage):
         mode = os.environ.get("SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs")
         logger.info(f"Compiling text encoder with mode: {mode}")
         try:
-            self.text_encoder.forward = torch.compile(self.text_encoder.forward, mode=mode)
+            self.text_encoder.forward = torch.compile(self.text_encoder.forward, mode=mode, dynamic=True)
             logger.info("[DEBUG] Successfully compiled text encoder")
         except Exception as e:
             logger.error(f"Failed to compile text encoder: {e}")

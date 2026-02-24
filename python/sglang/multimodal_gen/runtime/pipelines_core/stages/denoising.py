@@ -146,8 +146,9 @@ class DenoisingStage(PipelineStage):
             pass
         mode = os.environ.get("SGLANG_TORCH_COMPILE_MODE", "max-autotune-no-cudagraphs")
         logger.info(f"Compiling transformer with mode: {mode}")
-        # TODO(triple-mu): support customized fullgraph and dynamic in the future
-        module.compile(mode=mode, fullgraph=False, dynamic=None)
+        # Keep the module-level compile path from v0.5.9, but enable dynamic
+        # shapes so repeated image requests can reuse the compiled graph.
+        module.compile(mode=mode, fullgraph=False, dynamic=True)
 
     def _maybe_enable_cache_dit(
         self, num_inference_steps: int | tuple[int, int], batch: Req
