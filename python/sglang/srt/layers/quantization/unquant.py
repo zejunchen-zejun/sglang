@@ -39,6 +39,7 @@ _is_cpu_amx_available = cpu_has_amx_support()
 _is_hip = is_hip()
 _is_cpu = is_cpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_use_naive_moe = get_bool_env_var("SGLANG_MOE_NAIVE")
 
 if _use_aiter:
     from aiter import ActivationType
@@ -223,7 +224,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             set_weight_attrs(w2_weight_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if _use_aiter:
+        if _use_aiter and not _use_naive_moe:
             layer.w13_weight = torch.nn.Parameter(
                 shuffle_weight(layer.w13_weight.data, (16, 16)),
                 requires_grad=False,
@@ -273,6 +274,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_output = dispatch_output.topk_output
 
         moe_runner_config = self.moe_runner_config
+
+        if _use_naive_moe:
+            from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
+
+            topk_weights, topk_ids, _ = topk_output
+            print("moe_forward_native start")
+            output = moe_forward_native(
+                layer,
+                x,
+                topk_output,
+                moe_runner_config,
+            )
+            return StandardCombineInput(hidden_states=output)
 
         backend = self.runner.runner_backend
         if backend.is_triton_kernels():

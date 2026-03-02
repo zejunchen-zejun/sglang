@@ -112,7 +112,95 @@ if _is_hip and (_use_aiter or _use_hip_int4):
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
+_use_naive_moe = get_bool_env_var("SGLANG_MOE_NAIVE")
+
 logger = logging.getLogger(__name__)
+
+logger.warning(
+    "fp8.py: _use_naive_moe=%s, _use_aiter=%s, _use_hip_int4=%s, _is_hip=%s",
+    _use_naive_moe, _use_aiter, _use_hip_int4, _is_hip,
+)
+
+
+def _block_fp8_dequantize(
+    weight_fp8: torch.Tensor,
+    scale: torch.Tensor,
+    block_n: int,
+    block_k: int,
+) -> torch.Tensor:
+    E, N, K = weight_fp8.shape
+    scale_n, scale_k = scale.shape[1], scale.shape[2]
+
+    weight = weight_fp8.to(torch.float32)
+
+    N_padded = scale_n * block_n
+    K_padded = scale_k * block_k
+
+    if N_padded != N or K_padded != K:
+        w_padded = torch.zeros(
+            E, N_padded, K_padded, dtype=torch.float32, device=weight.device
+        )
+        w_padded[:, :N, :K] = weight
+        weight = w_padded
+
+    weight = weight.view(E, scale_n, block_n, scale_k, block_k)
+    weight = weight * scale.view(E, scale_n, 1, scale_k, 1)
+    weight = weight.view(E, N_padded, K_padded)[:, :N, :K]
+    return weight
+
+
+def naive_fp8_moe(
+    hidden_states: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    block_quant: bool = False,
+    block_shape: Optional[list] = None,
+    activation: str = "silu",
+) -> torch.Tensor:
+    dtype = hidden_states.dtype
+    compute_type = torch.float32
+    B, D = hidden_states.shape
+    topk = topk_weights.shape[1]
+    E = w13_weight.shape[0]
+    inter_dim = w2_weight.shape[2]
+
+    if block_quant and block_shape is not None:
+        block_n, block_k = block_shape
+        w13 = _block_fp8_dequantize(w13_weight, w13_scale, block_n, block_k)
+        w2 = _block_fp8_dequantize(w2_weight, w2_scale, block_n, block_k)
+    else:
+        w13_s = w13_scale
+        w2_s = w2_scale
+        if w13_s.dim() == 1:
+            w13_s = w13_s.view(E, 1, 1)
+        if w2_s.dim() == 1:
+            w2_s = w2_s.view(E, 1, 1)
+        w13 = w13_weight.to(compute_type) * w13_s.to(compute_type)
+        w2 = w2_weight.to(compute_type) * w2_s.to(compute_type)
+
+    x = hidden_states.to(compute_type)
+    x = x.view(B, 1, D).repeat(1, topk, 1)
+
+    out = torch.zeros(B, topk, D, dtype=compute_type, device=hidden_states.device)
+
+    for expert_id in range(E):
+        mask = topk_ids == expert_id
+        if not mask.any():
+            continue
+        sub_tokens = x[mask]
+        gate_up = sub_tokens @ w13[expert_id].T
+        gate, up = gate_up.split([inter_dim, inter_dim], dim=-1)
+        if activation == "silu":
+            intermediate = F.silu(gate) * up
+        else:
+            intermediate = F.gelu(gate) * up
+        out[mask] = intermediate @ w2[expert_id].T
+
+    return (out * topk_weights.to(compute_type).view(B, topk, 1)).sum(dim=1).to(dtype)
 
 
 class Fp8Config(QuantizationConfig):
@@ -742,7 +830,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
                 layer.w2_input_scale = None
 
-            if _use_aiter:
+            if _use_aiter and not _use_naive_moe:
                 # Pre-shuffle weights
                 layer.w13_weight.data = shuffle_weight(
                     layer.w13_weight.contiguous(), (16, 16)
@@ -920,7 +1008,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             padding_size,  # Avoid circular import
         )
 
-        if _use_aiter:
+        if _use_aiter and not _use_naive_moe:
             layer.w13_weight = torch.nn.Parameter(
                 shuffle_weight(layer.w13_weight.data, (16, 16)),
                 requires_grad=False,
@@ -985,6 +1073,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         x = dispatch_output.hidden_states
         moe_runner_config = self.moe_runner_config
+
+        if _use_naive_moe:
+            logger.warning("fp8.py naive_fp8_moe called, block_quant=%s", self.block_quant)
+            print("fp8.py moe_forward_native start")
+            topk_weights, topk_ids, _ = dispatch_output.topk_output
+            if self.block_quant:
+                w13_scale = layer.w13_weight_scale_inv
+                w2_scale = layer.w2_weight_scale_inv
+            else:
+                w13_scale = layer.w13_weight_scale
+                w2_scale = layer.w2_weight_scale
+            output = naive_fp8_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                w13_scale=w13_scale,
+                w2_scale=w2_scale,
+                block_quant=self.block_quant,
+                block_shape=self.quant_config.weight_block_size,
+                activation=moe_runner_config.activation,
+            )
+            return StandardCombineInput(hidden_states=output)
 
         if use_intel_amx_backend(layer):
             from sglang.srt.layers.moe.topk import apply_topk_weights_cpu

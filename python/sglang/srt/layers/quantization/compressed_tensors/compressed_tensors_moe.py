@@ -68,6 +68,7 @@ _is_hip = is_hip()
 _is_cuda = is_cuda()
 
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+_use_naive_moe = get_bool_env_var("SGLANG_MOE_NAIVE")
 
 if _use_aiter:
     from aiter import ActivationType, QuantType
@@ -331,7 +332,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 max_w13_scales, requires_grad=False
             )
 
-        if _use_aiter:
+        if _use_aiter and not _use_naive_moe:
             padding_size = get_int_env_var("AITER_MOE_PADDING_SIZE")
 
             N = layer.w2_weight.shape[-1]
@@ -424,6 +425,25 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         topk_output = dispatch_output.topk_output
 
         moe_runner_config = self.moe_runner_config
+
+        if _use_naive_moe:
+            topk_weights, topk_ids, _ = topk_output
+            # logger.warning("compressed_tensors naive_fp8_moe called")
+            from sglang.srt.layers.quantization.fp8 import naive_fp8_moe
+
+            output = naive_fp8_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                w13_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                block_quant=False,
+                block_shape=None,
+                activation=moe_runner_config.activation,
+            )
+            return StandardCombineInput(hidden_states=output)
 
         if _use_aiter:
             topk_weights, topk_ids, _ = topk_output
