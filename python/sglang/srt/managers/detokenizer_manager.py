@@ -143,6 +143,24 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             assert len(output) > 0
             # NOTE: We can always assume the last token is the matched stop token
             return output[:-1]
+        
+        # FIX: Handle the case where matched is an int (token ID) but output is a str (decoded text)
+        # This can happen in concurrent batch processing when stop token is matched but output is already decoded.
+        # Previously, this case was not handled, which could lead to incorrect accuracy evaluation
+        # when the stop token was not properly removed from the decoded text.
+        if isinstance(matched, int) and isinstance(output, str):
+            try:
+                # Decode the stop token ID to string and remove it from output
+                stop_str = self.tokenizer.decode([matched])
+                pos = output.rfind(stop_str)
+                if pos != -1:
+                    return output[:pos]
+                # If stop string not found, return original output (stop token may have been already removed)
+                return output
+            except Exception:
+                # If decoding fails, return original output to avoid breaking the pipeline
+                return output
+        
         return output
 
     def handle_batch_embedding_out(self, recv_obj: BatchEmbeddingOutput):
@@ -167,6 +185,12 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             else:
                 s = self.decode_status[rid]
                 s.decode_ids.extend(recv_obj.decode_ids[i])
+                # FIX: If decoded_text is empty but sent_offset > 0, it means state was lost (e.g., request was re-processed).
+                # Reset sent_offset to 0 to avoid skipping content.
+                # This happens when the first batch completes and state is cleared in tokenizer_manager,
+                # but detokenizer_manager still has sent_offset from the previous batch.
+                if (not s.decoded_text or len(s.decoded_text) == 0) and s.sent_offset > 0:
+                    s.sent_offset = 0
 
             read_ids.append(
                 self.trim_matched_stop(
