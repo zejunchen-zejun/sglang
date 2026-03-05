@@ -10,6 +10,9 @@ from einops import rearrange
 from sglang.srt.environ import Envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.fla.fused_gdn_gating import fused_gdn_gating
+from sglang.srt.layers.attention.fla.fused_gdn_gating_prefill import (
+    fused_gdn_gating_and_sigmoid,
+)
 from sglang.srt.layers.attention.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule_update,
 )
@@ -1026,7 +1029,12 @@ class GDNAttnBackend(MambaAttnBackendBase):
         key = key.view(1, actual_seq_len, layer.num_k_heads, layer.head_k_dim)
         value = value.view(1, actual_seq_len, layer.num_v_heads, layer.head_v_dim)
 
-        g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
+        if _is_hip:
+            g, beta = fused_gdn_gating_and_sigmoid(layer.A_log, a, b, layer.dt_bias)
+            g = g.unsqueeze(0)
+            beta = beta.unsqueeze(0)
+        else:
+            g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
 
         if is_target_verify:
             core_attn_out = fused_recurrent_gated_delta_rule_update(
