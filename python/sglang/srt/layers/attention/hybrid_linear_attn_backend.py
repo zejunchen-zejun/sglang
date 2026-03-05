@@ -27,6 +27,9 @@ from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from sglang.srt.layers.attention.mamba.causal_conv1d_split_qkv import (
+    causal_conv1d_update_split_qkv,
+)
 from sglang.srt.layers.attention.mamba.mamba import MambaMixer2
 from sglang.srt.layers.attention.mamba.mamba2_metadata import (
     ForwardMetadata,
@@ -40,8 +43,10 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.spec_info import SpecInput
-from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_npu
+from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_npu
 from sglang.srt.utils.common import rank0_log
+
+_is_hip = is_hip()
 
 if not is_cpu() and not is_npu():
     # fix import error on CPU device, no impacts when non-CPU path
@@ -870,21 +875,31 @@ class GDNAttnBackend(MambaAttnBackendBase):
         ssm_states = layer_cache.temporal
         query_start_loc = self.forward_metadata.query_start_loc
         cache_indices = self.forward_metadata.mamba_cache_indices
-        mixed_qkv = causal_conv1d_update(
-            mixed_qkv,
-            conv_states,
-            layer.conv_weights,
-            layer.bias,
-            layer.activation,
-            conv_state_indices=cache_indices,
-        )
-
-        query, key, value = torch.split(
-            mixed_qkv,
-            [layer.q_dim, layer.k_dim, layer.v_dim],
-            dim=-1,
-        )
-        # Reshape from [bs, h*d] to [1, bs, h, d]
+        if _is_hip:
+            query, key, value = causal_conv1d_update_split_qkv(
+                mixed_qkv,
+                conv_states,
+                layer.conv_weights,
+                key_dim=layer.k_dim,
+                value_dim=layer.v_dim,
+                bias=layer.bias,
+                activation=layer.activation,
+                conv_state_indices=cache_indices,
+            )
+        else:
+            mixed_qkv = causal_conv1d_update(
+                mixed_qkv,
+                conv_states,
+                layer.conv_weights,
+                layer.bias,
+                layer.activation,
+                conv_state_indices=cache_indices,
+            )
+            query, key, value = torch.split(
+                mixed_qkv,
+                [layer.q_dim, layer.k_dim, layer.v_dim],
+                dim=-1,
+            )
         bs = forward_batch.batch_size
         query = query.view(1, bs, layer.num_q_heads, layer.head_q_dim)
         key = key.view(1, bs, layer.num_k_heads, layer.head_k_dim)
