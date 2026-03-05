@@ -76,12 +76,16 @@ from sglang.srt.models.qwen3_next import gdn_with_output
 from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
 
 # Utils
-from sglang.srt.utils import add_prefix, is_cuda, is_npu, make_layers, set_weight_attrs
+from sglang.srt.utils import add_prefix, is_cuda, is_hip, is_npu, make_layers, set_weight_attrs
 from sglang.srt.utils.hf_transformers_utils import get_processor
 
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
+_is_hip = is_hip()
 _is_npu = is_npu()
+
+if _is_hip:
+    from sglang.srt.layers.elementwise import fused_sigmoid_mul
 
 cached_get_processor = lru_cache(get_processor)
 
@@ -601,8 +605,10 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         attn_output = self.attn(q, k, v, forward_batch)
 
         if self.attn_output_gate:
-            gate = torch.sigmoid(gate)
-            attn_output = attn_output * gate
+            if _is_hip:
+                fused_sigmoid_mul(gate, attn_output, out=attn_output)
+            else:
+                attn_output = torch.sigmoid(gate) * attn_output
 
         output, _ = self.o_proj(attn_output)
         return output
