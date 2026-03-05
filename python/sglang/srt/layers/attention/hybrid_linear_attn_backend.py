@@ -30,6 +30,9 @@ from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from sglang.srt.layers.attention.mamba.causal_conv1d_fwd_split_qkv import (
+    causal_conv1d_fn_split_qkv,
+)
 from sglang.srt.layers.attention.mamba.causal_conv1d_split_qkv import (
     causal_conv1d_update_split_qkv,
 )
@@ -1006,23 +1009,41 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 mask_indices = forward_batch.mamba_track_mask.nonzero(as_tuple=True)[0]
                 conv_states[conv_dst[mask_indices]] = mixed_qkv_to_track
 
-            mixed_qkv = causal_conv1d_fn(
-                mixed_qkv,
-                layer.conv_weights,
-                layer.bias,
-                activation=layer.activation,
-                conv_states=conv_states,
-                has_initial_state=has_initial_states,
-                cache_indices=cache_indices,
-                query_start_loc=query_start_loc,
-                seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
-            ).transpose(0, 1)[:seq_len]
+            if _is_hip:
+                query, key, value = causal_conv1d_fn_split_qkv(
+                    mixed_qkv,
+                    layer.conv_weights,
+                    layer.bias,
+                    conv_states=conv_states,
+                    query_start_loc=query_start_loc,
+                    seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+                    k_dim=layer.k_dim,
+                    v_dim=layer.v_dim,
+                    cache_indices=cache_indices,
+                    has_initial_state=has_initial_states,
+                    activation=layer.activation,
+                )
+                query = query[:seq_len]
+                key = key[:seq_len]
+                value = value[:seq_len]
+            else:
+                mixed_qkv = causal_conv1d_fn(
+                    mixed_qkv,
+                    layer.conv_weights,
+                    layer.bias,
+                    activation=layer.activation,
+                    conv_states=conv_states,
+                    has_initial_state=has_initial_states,
+                    cache_indices=cache_indices,
+                    query_start_loc=query_start_loc,
+                    seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+                ).transpose(0, 1)[:seq_len]
 
-        query, key, value = torch.split(
-            mixed_qkv,
-            [layer.q_dim, layer.k_dim, layer.v_dim],
-            dim=-1,
-        )
+                query, key, value = torch.split(
+                    mixed_qkv,
+                    [layer.q_dim, layer.k_dim, layer.v_dim],
+                    dim=-1,
+                )
 
         actual_seq_len = query.shape[0]
         query = query.view(1, actual_seq_len, layer.num_q_heads, layer.head_q_dim)
