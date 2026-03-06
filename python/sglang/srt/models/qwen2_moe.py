@@ -79,15 +79,22 @@ from sglang.srt.utils import (
     cpu_has_amx_support,
     is_cpu,
     is_cuda,
+    is_hip,
     make_layers,
     use_intel_amx_backend,
+    get_bool_env_var,
 )
 
 logger = logging.getLogger(__name__)
 
 _is_cuda = is_cuda()
+_is_hip = is_hip()
 _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+
+if _use_aiter:
+    from aiter import silu_and_mul
 
 
 class Qwen2MoeMLP(nn.Module):
@@ -126,7 +133,10 @@ class Qwen2MoeMLP(nn.Module):
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
-        self.act_fn = SiluAndMul()
+        if _use_aiter:
+            self.act_fn = silu_and_mul
+        else:
+            self.act_fn = SiluAndMul()
 
     def forward(
         self,
@@ -135,7 +145,15 @@ class Qwen2MoeMLP(nn.Module):
         use_reduce_scatter: bool = False,
     ):
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
+        if _use_aiter:
+            x = torch.empty(
+                (gate_up.shape[0], gate_up.shape[1] // 2),
+                dtype=gate_up.dtype,
+                device=gate_up.device,
+            )
+            self.act_fn(x, gate_up)
+        else:
+            x = self.act_fn(gate_up)
         x, _ = self.down_proj(
             x, skip_all_reduce=should_allreduce_fusion or use_reduce_scatter
         )
