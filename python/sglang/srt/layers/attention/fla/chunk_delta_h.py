@@ -14,8 +14,10 @@ from sglang.srt.layers.attention.fla.index import (
 )
 from sglang.srt.layers.attention.fla.op import exp, safe_exp
 from sglang.srt.layers.attention.fla.utils import is_nvidia_hopper
+from sglang.srt.utils import is_hip
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
+_is_hip = is_hip()
 CHUNK_SIZE = 64
 
 
@@ -327,7 +329,7 @@ def chunk_gated_delta_rule_fwd_h(
         K=K,
         V=V,
         BT=BT,
-        BV=32,
+        BV=16 if _is_hip else 32,
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_INITIAL_STATE=initial_state is not None,

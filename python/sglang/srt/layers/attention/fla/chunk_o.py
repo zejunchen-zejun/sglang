@@ -11,11 +11,20 @@ import triton.language as tl
 from sglang.srt.layers.attention.fla.index import prepare_chunk_indices
 from sglang.srt.layers.attention.fla.op import exp, safe_exp
 from sglang.srt.layers.attention.fla.utils import check_shared_mem, is_nvidia_hopper
+from sglang.srt.utils import is_hip
+
+_is_hip = is_hip()
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 
 
+@triton.heuristics(
+    {
+        "USE_G": lambda args: args["g"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
 # @triton.autotune(
 #     configs=[
 #         triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
@@ -148,6 +157,11 @@ def chunk_fwd_o(
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)
 
+    if _is_hip:
+        _BK, _BV, _num_warps, _num_stages = 64, 64, 4, 2
+    else:
+        _BK, _BV, _num_warps, _num_stages = 128, 64, 4, 2
+
     chunk_fwd_kernel_o[grid](
         q,
         k,
@@ -164,11 +178,9 @@ def chunk_fwd_o(
         K=K,
         V=V,
         BT=BT,
-        BK=128,
-        BV=64,
-        USE_G=g is not None,
-        IS_VARLEN=cu_seqlens is not None,
-        num_warps=4,
-        num_stages=2,
+        BK=_BK,
+        BV=_BV,
+        num_warps=_num_warps,
+        num_stages=_num_stages,
     )
     return o

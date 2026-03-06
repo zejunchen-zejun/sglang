@@ -10,6 +10,9 @@ from einops import rearrange
 from sglang.srt.environ import Envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.fla.fused_gdn_gating import fused_gdn_gating
+from sglang.srt.layers.attention.fla.fused_gdn_gating_prefill import (
+    fused_gdn_gating_and_sigmoid,
+)
 from sglang.srt.layers.attention.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule_update,
 )
@@ -27,6 +30,12 @@ from sglang.srt.layers.attention.mamba.causal_conv1d_triton import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from sglang.srt.layers.attention.mamba.causal_conv1d_fwd_split_qkv import (
+    causal_conv1d_fn_split_qkv,
+)
+from sglang.srt.layers.attention.mamba.causal_conv1d_split_qkv import (
+    causal_conv1d_update_split_qkv,
+)
 from sglang.srt.layers.attention.mamba.mamba import MambaMixer2
 from sglang.srt.layers.attention.mamba.mamba2_metadata import (
     ForwardMetadata,
@@ -40,8 +49,10 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.spec_info import SpecInput
-from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_npu
+from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_npu
 from sglang.srt.utils.common import rank0_log
+
+_is_hip = is_hip()
 
 if not is_cpu() and not is_npu():
     # fix import error on CPU device, no impacts when non-CPU path
@@ -870,21 +881,31 @@ class GDNAttnBackend(MambaAttnBackendBase):
         ssm_states = layer_cache.temporal
         query_start_loc = self.forward_metadata.query_start_loc
         cache_indices = self.forward_metadata.mamba_cache_indices
-        mixed_qkv = causal_conv1d_update(
-            mixed_qkv,
-            conv_states,
-            layer.conv_weights,
-            layer.bias,
-            layer.activation,
-            conv_state_indices=cache_indices,
-        )
-
-        query, key, value = torch.split(
-            mixed_qkv,
-            [layer.q_dim, layer.k_dim, layer.v_dim],
-            dim=-1,
-        )
-        # Reshape from [bs, h*d] to [1, bs, h, d]
+        if _is_hip:
+            query, key, value = causal_conv1d_update_split_qkv(
+                mixed_qkv,
+                conv_states,
+                layer.conv_weights,
+                key_dim=layer.k_dim,
+                value_dim=layer.v_dim,
+                bias=layer.bias,
+                activation=layer.activation,
+                conv_state_indices=cache_indices,
+            )
+        else:
+            mixed_qkv = causal_conv1d_update(
+                mixed_qkv,
+                conv_states,
+                layer.conv_weights,
+                layer.bias,
+                layer.activation,
+                conv_state_indices=cache_indices,
+            )
+            query, key, value = torch.split(
+                mixed_qkv,
+                [layer.q_dim, layer.k_dim, layer.v_dim],
+                dim=-1,
+            )
         bs = forward_batch.batch_size
         query = query.view(1, bs, layer.num_q_heads, layer.head_q_dim)
         key = key.view(1, bs, layer.num_k_heads, layer.head_k_dim)
@@ -988,30 +1009,53 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 mask_indices = forward_batch.mamba_track_mask.nonzero(as_tuple=True)[0]
                 conv_states[conv_dst[mask_indices]] = mixed_qkv_to_track
 
-            mixed_qkv = causal_conv1d_fn(
-                mixed_qkv,
-                layer.conv_weights,
-                layer.bias,
-                activation=layer.activation,
-                conv_states=conv_states,
-                has_initial_state=has_initial_states,
-                cache_indices=cache_indices,
-                query_start_loc=query_start_loc,
-                seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
-            ).transpose(0, 1)[:seq_len]
+            if _is_hip:
+                query, key, value = causal_conv1d_fn_split_qkv(
+                    mixed_qkv,
+                    layer.conv_weights,
+                    layer.bias,
+                    conv_states=conv_states,
+                    query_start_loc=query_start_loc,
+                    seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+                    k_dim=layer.k_dim,
+                    v_dim=layer.v_dim,
+                    cache_indices=cache_indices,
+                    has_initial_state=has_initial_states,
+                    activation=layer.activation,
+                )
+                query = query[:seq_len]
+                key = key[:seq_len]
+                value = value[:seq_len]
+            else:
+                mixed_qkv = causal_conv1d_fn(
+                    mixed_qkv,
+                    layer.conv_weights,
+                    layer.bias,
+                    activation=layer.activation,
+                    conv_states=conv_states,
+                    has_initial_state=has_initial_states,
+                    cache_indices=cache_indices,
+                    query_start_loc=query_start_loc,
+                    seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+                ).transpose(0, 1)[:seq_len]
 
-        query, key, value = torch.split(
-            mixed_qkv,
-            [layer.q_dim, layer.k_dim, layer.v_dim],
-            dim=-1,
-        )
+                query, key, value = torch.split(
+                    mixed_qkv,
+                    [layer.q_dim, layer.k_dim, layer.v_dim],
+                    dim=-1,
+                )
 
         actual_seq_len = query.shape[0]
         query = query.view(1, actual_seq_len, layer.num_q_heads, layer.head_q_dim)
         key = key.view(1, actual_seq_len, layer.num_k_heads, layer.head_k_dim)
         value = value.view(1, actual_seq_len, layer.num_v_heads, layer.head_v_dim)
 
-        g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
+        if _is_hip:
+            g, beta = fused_gdn_gating_and_sigmoid(layer.A_log, a, b, layer.dt_bias)
+            g = g.unsqueeze(0)
+            beta = beta.unsqueeze(0)
+        else:
+            g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
 
         if is_target_verify:
             core_attn_out = fused_recurrent_gated_delta_rule_update(

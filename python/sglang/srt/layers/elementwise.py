@@ -589,3 +589,47 @@ def silu_and_mul_triton(
         return out_hidden_states, out_scales
     else:
         return out_hidden_states, None
+
+
+@triton.jit
+def _fused_sigmoid_mul_kernel(
+    X,
+    Y,
+    OUT,
+    N,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < N
+
+    x = tl.load(X + offsets, mask=mask)
+    y = tl.load(Y + offsets, mask=mask)
+
+    sigmoid_x = 1.0 / (1.0 + tl.exp(-x.to(tl.float32)))
+    out = sigmoid_x * y.to(tl.float32)
+
+    tl.store(OUT + offsets, out.to(OUT.dtype.element_ty), mask=mask)
+
+
+def fused_sigmoid_mul(
+    x: torch.Tensor, y: torch.Tensor, out: torch.Tensor = None
+) -> torch.Tensor:
+    assert x.shape == y.shape, f"Shape mismatch: {x.shape} vs {y.shape}"
+
+    if out is None:
+        out = torch.empty_like(y)
+
+    N = x.numel()
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(N, BLOCK_SIZE),)
+
+    _fused_sigmoid_mul_kernel[grid](
+        x,
+        y,
+        out,
+        N,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=4,
+    )
+    return out
