@@ -835,9 +835,9 @@ class VisionAttention(nn.Module):
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             # [b, s, embed_dim] --> [b * s, head, head_size]
-            q = q.reshape(bsz * s, head, -1).contiguous()
-            k = k.reshape(bsz * s, kv_head, -1).contiguous()
-            v = v.reshape(bsz * s, kv_head, -1).contiguous()
+            q = q.reshape(bsz * s, head, -1)
+            k = k.reshape(bsz * s, kv_head, -1)
+            v = v.reshape(bsz * s, kv_head, -1)
             if self.qk_normalization_by_head_size:
                 q, k = self._apply_qk_norm_head_size(q, k)
         else:
@@ -884,10 +884,6 @@ class VisionAttention(nn.Module):
             # [total_tokens, head, head_size]
             q = q.view(-1, head, self.head_size)
             k = k.view(-1, head, self.head_size)
-
-            if cos.size(-1) * 2 == self.head_size:
-                cos = torch.cat([cos, cos], dim=-1)
-                sin = torch.cat([sin, sin], dim=-1)
 
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
             q = q.view(original_shape)
