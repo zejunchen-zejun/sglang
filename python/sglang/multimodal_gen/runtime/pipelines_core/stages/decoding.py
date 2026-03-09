@@ -59,6 +59,12 @@ class DecodingStage(PipelineStage):
     def __init__(self, vae, pipeline=None) -> None:
         super().__init__()
         self.vae: ParallelTiledVAE = vae
+        if self.vae is not None:
+            for module in self.vae.modules():
+                if isinstance(module, torch.nn.Conv3d):
+                    module = module.to(memory_format=torch.channels_last_3d)
+                elif isinstance(module, torch.nn.Conv2d):
+                    module = module.to(memory_format=torch.channels_last)
         self.pipeline = weakref.ref(pipeline) if pipeline else None
 
     @property
@@ -120,6 +126,10 @@ class DecodingStage(PipelineStage):
         """
         self.vae = self.vae.to(get_local_torch_device())
         latents = latents.to(get_local_torch_device())
+        if latents.dim() == 5:
+            latents = latents.to(memory_format=torch.channels_last_3d)
+        elif latents.dim() == 4:
+            latents = latents.to(memory_format=torch.channels_last)
         # Setup VAE precision
         vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
         vae_autocast_enabled = (
@@ -164,6 +174,12 @@ class DecodingStage(PipelineStage):
             )
             if pipeline:
                 pipeline.add_module("vae", self.vae)
+            if self.vae is not None:
+                for module in self.vae.modules():
+                    if isinstance(module, torch.nn.Conv3d):
+                        module = module.to(memory_format=torch.channels_last_3d)
+                    elif isinstance(module, torch.nn.Conv2d):
+                        module = module.to(memory_format=torch.channels_last)
             self.server_args.model_loaded["vae"] = True
 
     def offload_model(self):
