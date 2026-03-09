@@ -67,6 +67,7 @@ if _is_cuda or _is_xpu:
     )
 _has_vllm_rms_norm = False
 if _use_aiter:
+    from aiter import layer_norm, layernorm2d_fwd_with_add
     from aiter import rmsnorm2d_fwd as rms_norm
     from aiter import rmsnorm2d_fwd_with_add as fused_add_rms_norm
 
@@ -334,7 +335,7 @@ class LayerNorm(MultiPlatformOp):
         eps: float = 1e-6,
         elementwise_affine: bool = True,
         bias: bool = True,
-        dtype: torch.dtype = torch.float32,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -345,6 +346,9 @@ class LayerNorm(MultiPlatformOp):
 
         self.bias = nn.Parameter(torch.zeros(hidden_size, dtype=self.dtype))
         self.weight = nn.Parameter(torch.ones(hidden_size, dtype=self.dtype))
+
+        if _use_aiter:
+            self._forward_method = self.forward_aiter
 
     def forward_cuda(
         self,
@@ -362,12 +366,17 @@ class LayerNorm(MultiPlatformOp):
     def forward_native(
         self,
         x: torch.Tensor,
-    ) -> torch.Tensor:
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            x = x + residual
+            residual = x.to(x.dtype)
+
         weight = self.weight if self.elementwise_affine else None
         bias = self.bias if self.use_bias else None
         orig_dtype = x.dtype
         x = x.to(self.dtype)
-        return F.layer_norm(
+        output = F.layer_norm(
             x,
             (self.hidden_size,),
             weight=weight,
@@ -375,11 +384,34 @@ class LayerNorm(MultiPlatformOp):
             eps=self.variance_epsilon,
         ).to(orig_dtype)
 
+        return (output, residual) if residual is not None else output
+
+    def forward_aiter(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            residual_out = torch.empty_like(x)
+            output = torch.empty_like(x)
+            layernorm2d_fwd_with_add(
+                output,
+                x,
+                residual,
+                residual_out,
+                self.weight.data,
+                self.bias.data,
+                self.variance_epsilon,
+            )
+            return output, residual_out
+        return layer_norm(x, self.weight.data, self.bias.data, self.variance_epsilon)
+
     def forward_hip(
         self,
         x: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.forward_native(x)
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        return self.forward_native(x, residual)
 
     def forward_npu(
         self,

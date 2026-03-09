@@ -31,6 +31,7 @@ from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.vision import VisionAttention
+from sglang.srt.layers.layernorm import LayerNorm
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_rank,
     get_attention_tp_size,
@@ -175,7 +176,10 @@ class Qwen3_VisionBlock(nn.Module):
     ) -> None:
         super().__init__()
         if norm_layer is None:
-            norm_layer = partial(nn.LayerNorm, eps=1e-6)
+            if _use_aiter:
+                norm_layer = partial(LayerNorm, eps=1e-6)
+            else:
+                norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
 
@@ -208,8 +212,21 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         output_ws: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        hidden_states = self.norm1(x)
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        _use_fused_rmsnorm = isinstance(self.norm1, LayerNorm)
+
+        if _use_fused_rmsnorm:
+            # Fused add+norm path (aiter)
+            if residual is None:
+                hidden_states = self.norm1(x)
+                residual = x
+            else:
+                hidden_states, residual = self.norm1(x, residual=residual)
+        else:
+            # Original path
+            hidden_states = self.norm1(x)
+
         hidden_states = rearrange(hidden_states, "s b ... -> b s ...")
         attn = self.attn(
             hidden_states,
@@ -219,11 +236,19 @@ class Qwen3_VisionBlock(nn.Module):
             output_ws=output_ws,
         )
         attn = rearrange(attn, "b s ... -> s b ...")
-        x += attn
-        norm2 = self.norm2(x)
-        mlp = self.mlp(norm2)
-        x += mlp
-        return x
+
+        if _use_fused_rmsnorm:
+            # Fused add + norm2
+            norm2, x = self.norm2(attn, residual=residual)
+            mlp = self.mlp(norm2)
+            return mlp, x
+        else:
+            # Original path
+            x += attn
+            norm2 = self.norm2(x)
+            mlp = self.mlp(norm2)
+            x += mlp
+            return x
 
 
 class Qwen3VLMoeVisionPatchMerger(nn.Module):
@@ -272,11 +297,23 @@ class Qwen3VLMoeVisionPatchMerger(nn.Module):
             use_dp_attention_reduce=is_dp_attention_enabled(),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, residual: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         if self.use_postshuffle_norm:
-            x = self.norm(x.view(-1, self.hidden_size))
+            if residual is not None:
+                x, _ = self.norm(
+                    x.view(-1, self.hidden_size),
+                    residual=residual.view(-1, self.hidden_size),
+                )
+            else:
+                x = self.norm(x.view(-1, self.hidden_size))
         else:
-            x = self.norm(x).view(-1, self.hidden_size)
+            if residual is not None:
+                x, _ = self.norm(x, residual=residual)
+                x = x.view(-1, self.hidden_size)
+            else:
+                x = self.norm(x).view(-1, self.hidden_size)
 
         x_parallel, _ = self.linear_fc1(x)
         x_parallel = self.act_fn(x_parallel)
@@ -326,7 +363,10 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
         else:
             self.pos_embed = PPMissingLayer()
 
-        norm_layer = partial(nn.LayerNorm, eps=norm_eps)
+        if _use_aiter:
+            norm_layer = partial(LayerNorm, eps=norm_eps)
+        else:
+            norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
@@ -576,22 +616,28 @@ class Qwen3VLMoeVisionModel(nn.Module, RotaryPosMixin):
 
         deepstack_feature_lists = []
         num_deepstack_captured = 0
+        residual = None
 
         for layer_num, blk in enumerate(self.blocks):
-            x = blk(
+            result = blk(
                 x,
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
+                residual=residual,
             )
+            if isinstance(result, tuple):
+                x, residual = result
+            else:
+                x = result
 
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = self.deepstack_merger_list[num_deepstack_captured](
-                    x
+                    x, residual=residual
                 )
                 deepstack_feature_lists.append(deepstack_feature)
                 num_deepstack_captured += 1
-        x = self.merger(x)
+        x = self.merger(x, residual=residual)
         hidden_states = torch.cat(
             [x] + deepstack_feature_lists, dim=1
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
