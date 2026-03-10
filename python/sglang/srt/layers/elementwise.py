@@ -633,3 +633,63 @@ def fused_sigmoid_mul(
         num_warps=4,
     )
     return out
+
+
+@triton.jit
+def _fused_sigmoid_mul_broadcast_kernel(
+    X,
+    Y,
+    OUT,
+    N,
+    H,
+    stride_y,
+    BLOCK_N: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    row_offsets = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    col_offsets = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+
+    row_mask = row_offsets < N
+    col_mask = col_offsets < H
+
+    x = tl.load(X + row_offsets, mask=row_mask, other=0.0)
+    sigmoid_x = 1.0 / (1.0 + tl.exp(-x.to(tl.float32)))
+
+    y_ptrs = Y + row_offsets[:, None] * stride_y + col_offsets[None, :]
+    mask_2d = row_mask[:, None] & col_mask[None, :]
+    y = tl.load(y_ptrs, mask=mask_2d, other=0.0)
+
+    out = sigmoid_x[:, None] * y.to(tl.float32)
+
+    out_ptrs = OUT + row_offsets[:, None] * stride_y + col_offsets[None, :]
+    tl.store(out_ptrs, out.to(OUT.dtype.element_ty), mask=mask_2d)
+
+
+def fused_sigmoid_mul_broadcast(
+    x: torch.Tensor, y: torch.Tensor, out: torch.Tensor = None
+) -> torch.Tensor:
+    """Fused sigmoid(x) * y with broadcast from [N, 1] to [N, H]."""
+    assert x.dim() == 2 and y.dim() == 2
+    assert x.shape[0] == y.shape[0]
+    assert x.shape[1] == 1
+
+    N, H = y.shape
+
+    if out is None:
+        out = torch.empty_like(y)
+
+    def grid(META):
+        return (triton.cdiv(N, META["BLOCK_N"]), triton.cdiv(H, META["BLOCK_H"]))
+
+    _fused_sigmoid_mul_broadcast_kernel[grid](
+        x,
+        y,
+        out,
+        N,
+        H,
+        y.stride(0),
+    )
+    return out
