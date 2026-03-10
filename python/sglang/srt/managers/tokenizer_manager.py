@@ -81,6 +81,7 @@ from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicat
 from sglang.srt.managers.tokenizer_manager_multiitem_mixin import (
     TokenizerManagerMultiItemMixin,
 )
+from sglang.srt.managers.host_profiler_mixin import HostProfilerMixin
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
 from sglang.srt.metrics.cpu_monitor import start_cpu_monitor_thread
 from sglang.srt.sampling.sampling_params import SamplingParams
@@ -185,7 +186,7 @@ class InputFormat(Enum):
     CROSS_ENCODER_PAIRS = 3  # Cross-encoder pairs like [["query", "document"]]
 
 
-class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixin):
+class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixin, HostProfilerMixin):
     """TokenizerManager is a process that tokenizes the text."""
 
     def __init__(
@@ -195,6 +196,9 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
     ):
         # Parse args
         self.server_args = server_args
+
+        # Initialize host profiler
+        self.init_host_profiler()
         self.enable_metrics = server_args.enable_metrics
         self.preferred_sampling_params = server_args.preferred_sampling_params
         self.crash_dump_folder = server_args.crash_dump_folder
@@ -1628,6 +1632,11 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 self.dump_requests(state, out_dict)
             if self.crash_dump_folder and state.finished and state.obj.log_metrics:
                 self.record_request_for_crash_dump(state, out_dict)
+            
+            # Check host profiler auto-stop on finished requests
+            if state.finished:
+                self._check_host_profile_auto_stop()
+
 
         # When skip_tokenizer_init is enabled, tokensizer_manager receives
         # BatchTokenIDOutput.
@@ -1638,6 +1647,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         ):
             load_update_req = WatchLoadUpdateReq(loads=[recv_obj.load])
             self.send_to_scheduler.send_pyobj(load_update_req)
+
 
     def add_logprob_to_meta_info(
         self,
