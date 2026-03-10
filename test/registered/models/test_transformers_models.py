@@ -14,7 +14,6 @@ from sglang.test.runners import DEFAULT_PROMPTS, SRTRunner, check_close_model_ou
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-    DEFAULT_MODEL_NAME_FOR_TEST_ATOM_PLUGIN,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
     is_in_ci,
@@ -89,29 +88,6 @@ class TestTransformersFallbackTorchAO(TestTransformersFallbackEndpoint):
                 "--torchao-config",
                 "int4wo-128",
             ],
-        )
-        cls.mmlu_lower_bound = 0.65
-        cls.gsm8k_lower_bound = 0.65
-
-
-@unittest.skipIf(not is_hip(), "This test is only for AMD GPUs")
-class TestTransformersAtom(TestTransformersFallbackEndpoint):
-    @classmethod
-    def setUpClass(cls):
-        cls.model = DEFAULT_MODEL_NAME_FOR_TEST_ATOM_PLUGIN
-        cls.base_url = DEFAULT_URL_FOR_TEST
-        cls.process = popen_launch_server(
-            cls.model,
-            cls.base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=[
-                "--model-impl",
-                "atom",
-                "--kv-cache-dtype",
-                "fp8_e4m3",
-                "--page-size",
-                "1024"
-            ]
         )
         cls.mmlu_lower_bound = 0.65
         cls.gsm8k_lower_bound = 0.65

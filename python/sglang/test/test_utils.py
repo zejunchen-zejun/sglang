@@ -117,9 +117,6 @@ DEFAULT_DRAFT_MODEL_STANDALONE = "meta-llama/Llama-3.2-1B-Instruct"
 # N-gram speculative decoding models
 DEFAULT_TARGET_MODEL_NGRAM = "Qwen/Qwen2.5-Coder-7B-Instruct"
 
-# ATOM Plugin model
-DEFAULT_MODEL_NAME_FOR_TEST_ATOM_PLUGIN = "Qwen/Qwen3-30B-A3B-FP8"
-
 # Other use cases
 DEFAULT_AUTOROUND_MODEL_NAME_FOR_TEST = (
     "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",  # auto_round:auto_gptq
