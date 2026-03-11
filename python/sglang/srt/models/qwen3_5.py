@@ -92,9 +92,32 @@ _is_hip = is_hip()
 _is_npu = is_npu()
 
 if _is_hip:
-    from sglang.srt.layers.elementwise import fused_sigmoid_mul
+    from sglang.srt.layers.elementwise import fused_sigmoid_mul, fused_sigmoid_mul_broadcast
 
 cached_get_processor = lru_cache(get_processor)
+
+
+class Qwen3_5SparseMoeBlock(Qwen2MoeSparseMoeBlock):
+    """Qwen3.5-specific MoE block with fused shared expert gating on HIP."""
+
+    def _forward_shared_experts(self, hidden_states):
+        shared_output = None
+        if self.shared_expert is not None:
+            shared_output = self.shared_expert(hidden_states)
+            if self.shared_expert_gate is not None:
+                if _is_hip:
+                    gate_output = self.shared_expert_gate(hidden_states)
+                    shared_output = fused_sigmoid_mul_broadcast(
+                        gate_output, shared_output
+                    )
+                else:
+                    import torch.nn.functional as F
+
+                    shared_output = (
+                        F.sigmoid(self.shared_expert_gate(hidden_states))
+                        * shared_output
+                    )
+        return shared_output
 
 
 class Qwen3_5GatedDeltaNet(nn.Module):
@@ -342,7 +365,7 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         # NOTE: Determine the MLP type based on the model type
         # Qwen3.5 use all layers for MLP / Qwen3.5-MoE use sparse MoE blocks
         if config.model_type == "qwen3_5_moe_text":
-            self.mlp = Qwen2MoeSparseMoeBlock(
+            self.mlp = Qwen3_5SparseMoeBlock(
                 layer_id=layer_id,
                 config=config,
                 quant_config=quant_config,
@@ -526,7 +549,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             is_previous_layer_sparse = False
             is_next_layer_sparse = False
         elif config.model_type == "qwen3_5_moe_text":
-            self.mlp = Qwen2MoeSparseMoeBlock(
+            self.mlp = Qwen3_5SparseMoeBlock(
                 layer_id=layer_id,
                 config=config,
                 quant_config=quant_config,
