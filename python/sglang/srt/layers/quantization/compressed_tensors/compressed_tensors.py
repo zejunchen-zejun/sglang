@@ -118,6 +118,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     ):
         super().__init__()
         self.ignore = ignore
+
         self.quant_format = quant_format
         # Map from [target -> scheme]
         self.target_scheme_map = target_scheme_map
@@ -740,7 +741,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         # need to make accelerate optional in ct to do this
 
         # Use the new get_scheme_dict method to extract QuantizationArgs
+
         scheme_dict = self.get_scheme_dict(layer, layer_name)
+
         weight_quant = None
         input_quant = None
         if scheme_dict:
@@ -804,6 +807,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                 "format": str | None
             } | None
         """
+        prefix = "model.language_model"
+        if layer_name.startswith(prefix):
+            layer_name = "language_model.model" + layer_name[len(prefix) :]
+
         if should_ignore_layer(
             layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
         ):
