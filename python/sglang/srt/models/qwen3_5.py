@@ -826,6 +826,7 @@ class Qwen3_5ForCausalLM(nn.Module):
 
 
 class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
+
     def __init__(
         self,
         config: Qwen3_5TextConfig,
@@ -1114,6 +1115,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
 class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
     """Qwen3.5 MoE Vision-Language Model."""
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
     def __init__(
         self,
         config: Qwen3_5MoeConfig,
