@@ -993,6 +993,11 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 retrieve_parent_token=retrieve_parent_token,
             )
             mixed_qkv = mixed_qkv_processed.transpose(1, 2).view(seq_len, -1)
+            query, key, value = torch.split(
+                mixed_qkv,
+                [layer.q_dim, layer.k_dim, layer.v_dim],
+                dim=-1,
+            )
         else:
             mixed_qkv = mixed_qkv.transpose(0, 1)
             if (
