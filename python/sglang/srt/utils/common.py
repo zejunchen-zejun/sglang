@@ -909,7 +909,13 @@ def _decode_jpeg_gpu(img_tensor_bytes, device="cuda:1"):
         Decoded image tensor [C, H, W]
     """
 
-    from torchvision.io import decode_jpeg
+    try:
+        from torchvision.io import decode_jpeg
+    except ImportError:
+        raise ImportError(
+            "decode_jpeg is not available in the installed torchvision. "
+            "rocJPEG GPU decoding requires torchvision built with rocJPEG support (AMD GPU only)."
+        )
 
     # Decode directly on GPU (nvJPEG/rocJPEG)
     img = decode_jpeg(img_tensor_bytes, mode=ImageReadMode.RGB, device=device)
@@ -930,7 +936,13 @@ def batch_decode_jpeg_gpu(img_tensor_bytes_list: list, device="cuda:1"):
     if not img_tensor_bytes_list:
         return []
 
-    from torchvision.io import decode_jpeg
+    try:
+        from torchvision.io import decode_jpeg
+    except ImportError:
+        raise ImportError(
+            "decode_jpeg is not available in the installed torchvision. "
+            "rocJPEG GPU decoding requires torchvision built with rocJPEG support (AMD GPU only)."
+        )
 
     # Batch decode
     decoded_images = decode_jpeg(
