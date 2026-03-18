@@ -943,6 +943,7 @@ def batch_decode_jpeg_gpu(img_tensor_bytes_list: list, device="cuda:1"):
 def load_image_tensor(
     image_file: Union[Image.Image, str, ImageData, bytes],
     discard_alpha_channel: bool = True,
+    enable_rocjpeg: bool = False,
 ) -> tuple[Image.Image, tuple[int, int]]:
     """
     Load image, return preprocessed result for JPEG format (for batch decoding), decode directly for non-JPEG
@@ -950,10 +951,12 @@ def load_image_tensor(
     Args:
         image_file: Image data
         discard_alpha_channel: Whether to discard alpha channel
+        enable_rocjpeg: When True, JPEG images return (img_tensor_bytes, 'jpeg')
+            for batch GPU decoding; when False, all images are decoded immediately.
 
     Returns:
-        If JPEG: returns (img_tensor_bytes, 'jpeg')
-        If non-JPEG: returns (img_tensor, None)
+        If enable_rocjpeg=True and JPEG: returns (img_tensor_bytes, 'jpeg')
+        Otherwise: returns (img_tensor, None)
     """
 
     if isinstance(image_file, ImageData):
@@ -972,7 +975,7 @@ def load_image_tensor(
         # bytes format - detect if JPEG
         img_tensor_bytes = torch.frombuffer(bytearray(image_file), dtype=torch.uint8)
 
-        if _is_jpeg(img_tensor_bytes):
+        if enable_rocjpeg and _is_jpeg(img_tensor_bytes):
             # JPEG format - return preprocessed result only
             return img_tensor_bytes, "jpeg"
         else:
@@ -997,11 +1000,11 @@ def load_image_tensor(
             img_bytes = response.content
             img_tensor_bytes = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
 
-            if _is_jpeg(img_tensor_bytes):
+            if enable_rocjpeg and _is_jpeg(img_tensor_bytes):
                 # JPEG format - return preprocessed result only
                 return img_tensor_bytes, "jpeg"
             else:
-                # Non-JPEG format - decode directly and return complete tensor
+                # Non-JPEG format or rocjpeg disabled - decode directly and return complete tensor
                 try:
                     img_tensor = decode_image(img_tensor_bytes, mode=ImageReadMode.RGB)
                 except Exception:
@@ -1018,7 +1021,7 @@ def load_image_tensor(
         # Local file path - determine by extension
         is_jpeg = image_file.lower().endswith(("jpg", "jpeg"))
 
-        if is_jpeg:
+        if enable_rocjpeg and is_jpeg:
             # JPEG file - return preprocessed result only
             from torchvision.io import read_file
 
@@ -1048,7 +1051,7 @@ def load_image_tensor(
         # Convert to tensor bytes
         img_tensor_bytes = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
 
-        if is_jpeg:
+        if enable_rocjpeg and is_jpeg:
             # JPEG format - return preprocessed result only (no decoding)
             return img_tensor_bytes, "jpeg"
         else:
@@ -1069,11 +1072,11 @@ def load_image_tensor(
         img_bytes = pybase64.b64decode(image_file, validate=True)
         img_tensor_bytes = torch.frombuffer(bytearray(img_bytes), dtype=torch.uint8)
 
-        if _is_jpeg(img_tensor_bytes):
+        if enable_rocjpeg and _is_jpeg(img_tensor_bytes):
             # JPEG format - return preprocessed result only
             return img_tensor_bytes, "jpeg"
         else:
-            # Non-JPEG format - decode directly and return complete tensor
+            # Non-JPEG format or rocjpeg disabled - decode directly and return complete tensor
             try:
                 img_tensor = decode_image(img_tensor_bytes, mode=ImageReadMode.RGB)
             except Exception:
