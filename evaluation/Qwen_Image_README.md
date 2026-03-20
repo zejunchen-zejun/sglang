@@ -22,9 +22,9 @@
    GPU_ARCHS=gfx950 python3 setup.py install
    ```
 
-3. Install zejun/sglang dev/perf branch:
+3. Install zejun/sglang Qwen-Image-v0.5.8 branch:
    ```
-   git clone -b Qwen-Image https://github.com/zejunchen-zejun/sglang.git
+   git clone -b Qwen-Image-v0.5.8 https://github.com/zejunchen-zejun/sglang.git
    cd sglang
    pip install --upgrade pip
    cd sgl-kernel
@@ -215,7 +215,7 @@ export TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=0
 
 sglang serve \
     --model-path /mnt/raid0/pretrained_model/Qwen-Image-Edit \
-    --lora_path /mnt/raid0/pretrained_model/Qwen-Image-Edit-2511-Lightning \
+    --lora-path /mnt/raid0/pretrained_model/Qwen-Image-Edit-2511-Lightning \
     --num-gpus 2 \
     --ulysses-degree 2 \
     --image-encoder-precision bf16 \
