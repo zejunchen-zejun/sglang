@@ -177,10 +177,13 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsLinearScheme):
 
             if _use_aiter:
                 layout = (16, 16)
-                # keep the weight as (N, K)
-                layer.weight = Parameter(
-                    shuffle_weight(weight, layout), requires_grad=False
-                )
+                n, k = weight.shape
+                if k >= 192:
+                    layer.weight = Parameter(
+                        shuffle_weight(weight, layout), requires_grad=False
+                    )
+                else:
+                    layer.weight = Parameter(weight.data, requires_grad=False)
                 # FP8HIPB need to keep the weight as (K, N)
                 if get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB"):
                     AiterHipblaslt._initialize_hipblaslt()
