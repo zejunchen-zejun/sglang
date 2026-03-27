@@ -1300,14 +1300,16 @@ def apply_fp8_ptpc_linear(
     else:
         # weight is in (N, K)
         output_shape = [*input.shape[:-1], weight.shape[0]]
-        output = aiter.gemm_a8w8_bpreshuffle(
-            q_input,
-            weight,
-            x_scale,
-            weight_scale,
-            None,
-            dtype=torch.bfloat16 if input_scale is not None else input.dtype,
-        )
+        out_dtype = torch.bfloat16 if input_scale is not None else input.dtype
+        k = q_input.shape[1]
+        if k >= 192:
+            output = aiter.gemm_a8w8_bpreshuffle(
+                q_input, weight, x_scale, weight_scale, None, dtype=out_dtype,
+            )
+        else:
+            output = aiter.gemm_a8w8(
+                q_input, weight, x_scale, weight_scale, None, dtype=out_dtype,
+            )
     if bias is not None:
         output = output + bias
     return output.view(*output_shape)

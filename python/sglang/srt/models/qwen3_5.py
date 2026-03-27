@@ -90,6 +90,7 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_npu = is_npu()
+_use_fused_gdn_proj = _is_hip
 
 if _is_hip:
     from sglang.srt.layers.elementwise import fused_sigmoid_mul, fused_sigmoid_mul_broadcast
@@ -358,7 +359,13 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             if quant_config and quant_config.get_name() == "modelopt_fp4"
             else quant_config
         )
-        self.linear_attn = Qwen3_5GatedDeltaNet(
+        gdn_cls = Qwen3_5GatedDeltaNet
+        if _use_fused_gdn_proj:
+            from sglang.srt.models.qwen3_5_gdn_fused_proj import (
+                Qwen3_5GatedDeltaNetFusedProj,
+            )
+            gdn_cls = Qwen3_5GatedDeltaNetFusedProj
+        self.linear_attn = gdn_cls(
             config, layer_id, linear_attn_quant_config, alt_stream, prefix
         )
 
@@ -812,6 +819,16 @@ class Qwen3_5ForCausalLM(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        gdn_fused_proj_mapping = None
+        _load_fused_qkv = None
+        if _use_fused_gdn_proj:
+            from sglang.srt.models.qwen3_5_gdn_fused_proj import (
+                FUSED_PROJ_WEIGHT_MAPPING,
+                load_fused_qkv_weight,
+            )
+            gdn_fused_proj_mapping = FUSED_PROJ_WEIGHT_MAPPING
+            _load_fused_qkv = load_fused_qkv_weight
+
         loaded_params: Set[str] = set()
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
@@ -825,6 +842,32 @@ class Qwen3_5ForCausalLM(nn.Module):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+
+            if gdn_fused_proj_mapping is not None:
+                if ".linear_attn.in_proj_qkv." in name:
+                    mapped_name = name.replace("in_proj_qkv", "in_proj_fused")
+                    if mapped_name in params_dict:
+                        param = params_dict[mapped_name]
+                        weight_loader = getattr(param, "weight_loader")
+                        _load_fused_qkv(param, loaded_weight, weight_loader)
+                        loaded_params.add(mapped_name)
+                        continue
+
+                handled = False
+                for fused_name, ckpt_name, shard_id in gdn_fused_proj_mapping:
+                    if ckpt_name not in name:
+                        continue
+                    mapped_name = name.replace(ckpt_name, fused_name)
+                    if mapped_name not in params_dict:
+                        continue
+                    param = params_dict[mapped_name]
+                    weight_loader = getattr(param, "weight_loader")
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_params.add(mapped_name)
+                    handled = True
+                    break
+                if handled:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -936,6 +979,16 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
         loaded_params: Set[str] = set()
         params_dict = dict(self.named_parameters(remove_duplicate=False))
 
+        gdn_fused_proj_mapping = None
+        _load_fused_qkv = None
+        if _use_fused_gdn_proj:
+            from sglang.srt.models.qwen3_5_gdn_fused_proj import (
+                FUSED_PROJ_WEIGHT_MAPPING,
+                load_fused_qkv_weight,
+            )
+            gdn_fused_proj_mapping = FUSED_PROJ_WEIGHT_MAPPING
+            _load_fused_qkv = load_fused_qkv_weight
+
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -947,6 +1000,35 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+
+            if gdn_fused_proj_mapping is not None:
+                if ".linear_attn.in_proj_qkv." in name:
+                    mapped_name = name.replace("in_proj_qkv", "in_proj_fused")
+                    if not (mapped_name.endswith(ignore_suffixes) and mapped_name not in params_dict):
+                        if mapped_name in params_dict:
+                            param = params_dict[mapped_name]
+                            weight_loader = getattr(param, "weight_loader")
+                            _load_fused_qkv(param, loaded_weight, weight_loader)
+                            loaded_params.add(mapped_name)
+                            continue
+
+                handled = False
+                for fused_name, ckpt_name, shard_id in gdn_fused_proj_mapping:
+                    if ckpt_name not in name:
+                        continue
+                    mapped_name = name.replace(ckpt_name, fused_name)
+                    if mapped_name.endswith(ignore_suffixes) and mapped_name not in params_dict:
+                        continue
+                    if mapped_name not in params_dict:
+                        continue
+                    param = params_dict[mapped_name]
+                    weight_loader = getattr(param, "weight_loader")
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_params.add(mapped_name)
+                    handled = True
+                    break
+                if handled:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "experts.gate_up_proj" in name or "experts.down_proj" in name:
@@ -1244,6 +1326,16 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         loaded_params: Set[str] = set()
         params_dict = dict(self.named_parameters(remove_duplicate=False))
 
+        gdn_fused_proj_mapping = None
+        _load_fused_qkv = None
+        if _use_fused_gdn_proj:
+            from sglang.srt.models.qwen3_5_gdn_fused_proj import (
+                FUSED_PROJ_WEIGHT_MAPPING,
+                load_fused_qkv_weight,
+            )
+            gdn_fused_proj_mapping = FUSED_PROJ_WEIGHT_MAPPING
+            _load_fused_qkv = load_fused_qkv_weight
+
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1253,6 +1345,35 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 name = name.replace(r"model.language_model.", r"model.")
             if ".self_attn." in name:
                 name = name.replace(".self_attn", "")
+
+            if gdn_fused_proj_mapping is not None:
+                if ".linear_attn.in_proj_qkv." in name:
+                    mapped_name = name.replace("in_proj_qkv", "in_proj_fused")
+                    if not (mapped_name.endswith(ignore_suffixes) and mapped_name not in params_dict):
+                        if mapped_name in params_dict:
+                            param = params_dict[mapped_name]
+                            weight_loader = getattr(param, "weight_loader")
+                            _load_fused_qkv(param, loaded_weight, weight_loader)
+                            loaded_params.add(mapped_name)
+                            continue
+
+                handled = False
+                for fused_name, ckpt_name, shard_id in gdn_fused_proj_mapping:
+                    if ckpt_name not in name:
+                        continue
+                    mapped_name = name.replace(ckpt_name, fused_name)
+                    if mapped_name.endswith(ignore_suffixes) and mapped_name not in params_dict:
+                        continue
+                    if mapped_name not in params_dict:
+                        continue
+                    param = params_dict[mapped_name]
+                    weight_loader = getattr(param, "weight_loader")
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_params.add(mapped_name)
+                    handled = True
+                    break
+                if handled:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if name.endswith("experts.gate_up_proj") or name.endswith(
