@@ -1,9 +1,21 @@
-# Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
-
 # SPDX-License-Identifier: Apache-2.0
+#
+# Change: Qwen Image Edit (I2I) auto output size — if aspect ratio is extreme (very
+#         narrow portrait or very wide), fall back to 768x1024 before VAE alignment.
+#         Explicit API size (width+height set) is unchanged.
+#
+# Env (optional):
+#   SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE=1  — disable this behavior
+#   SGLANG_QWEN_I2I_AUTO_ASPECT_MIN   (default 0.52)  width/height lower bound
+#   SGLANG_QWEN_I2I_AUTO_ASPECT_MAX   (default 3.0)   width/height upper bound
+#   SGLANG_QWEN_I2I_FALLBACK_WIDTH    (default 768)
+#   SGLANG_QWEN_I2I_FALLBACK_HEIGHT   (default 1024)
+
 """
 Input validation stage for diffusion pipelines.
 """
+
+import os
 
 import numpy as np
 import torch
@@ -13,6 +25,9 @@ from PIL import Image
 from sglang.multimodal_gen.configs.pipeline_configs import WanI2V480PConfig
 from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType
 from sglang.multimodal_gen.configs.pipeline_configs.mova import MOVAPipelineConfig
+from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
+    QwenImageEditPipelineConfig,
+)
 from sglang.multimodal_gen.runtime.models.vision_utils import load_image, load_video
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
@@ -65,6 +80,49 @@ class InputValidationStage(PipelineStage):
         """
         height = round(np.sqrt(max_area * aspect_ratio)) // mod_value * mod_value
         width = round(np.sqrt(max_area / aspect_ratio)) // mod_value * mod_value
+
+        return width, height
+
+    @staticmethod
+    def _stabilize_qwen_edit_auto_output_size(
+        width: int,
+        height: int,
+    ) -> tuple[int, int]:
+        """
+        When the user does not pass an explicit output size, Qwen Image Edit derives
+        width/height from the last condition image (~1MP, preserve aspect). Very
+        narrow or very wide ratios often degrade quality; fall back to a moderate
+        canvas (defaults match common 768x1024 edit requests).
+
+        Disable with SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE=1.
+        Tune via SGLANG_QWEN_I2I_AUTO_ASPECT_MIN, SGLANG_QWEN_I2I_AUTO_ASPECT_MAX,
+        SGLANG_QWEN_I2I_FALLBACK_WIDTH, SGLANG_QWEN_I2I_FALLBACK_HEIGHT.
+        """
+        if os.environ.get(
+            "SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE", ""
+        ).lower() in ("1", "true", "yes"):
+            return width, height
+
+        r_min = float(os.environ.get("SGLANG_QWEN_I2I_AUTO_ASPECT_MIN", "0.52"))
+        r_max = float(os.environ.get("SGLANG_QWEN_I2I_AUTO_ASPECT_MAX", "3.0"))
+        fb_w = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_WIDTH", "768"))
+        fb_h = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_HEIGHT", "1024"))
+
+        r_out = width / height
+        if r_out < r_min or r_out > r_max:
+            logger.info(
+                "Qwen I2I auto output size: aspect ratio %.4f outside [%.4f, %.4f], "
+                "using fallback %dx%d (was %dx%d)",
+                r_out,
+                r_min,
+                r_max,
+                fb_w,
+                fb_h,
+                width,
+                height,
+            )
+            return fb_w, fb_h
+
         return width, height
 
     def _generate_seeds(self, batch: Req, server_args: ServerArgs):
@@ -129,8 +187,17 @@ class InputValidationStage(PipelineStage):
             # adjust output image size
             if calculated_size is not None:
                 calculated_width, calculated_height = calculated_size
+                user_set_both = (
+                    batch.width is not None and batch.height is not None
+                )
                 width = batch.width or calculated_width
                 height = batch.height or calculated_height
+                if (not user_set_both) and isinstance(
+                    config, QwenImageEditPipelineConfig
+                ):
+                    width, height = self._stabilize_qwen_edit_auto_output_size(
+                        width, height
+                    )
                 multiple_of = (
                     server_args.pipeline_config.vae_config.get_vae_scale_factor() * 2
                 )
@@ -235,6 +302,13 @@ class InputValidationStage(PipelineStage):
     ) -> Req:
         """
         Validate and prepare inputs.
+
+        Args:
+            batch: The current batch information.
+            server_args: The inference arguments.
+
+        Returns:
+            The validated batch information.
         """
 
         self._generate_seeds(batch, server_args)
