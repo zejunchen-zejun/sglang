@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Patched copy of:
-#   sglang/multimodal_gen/runtime/pipelines_core/stages/input_validation.py
-#
-# Apply: copy over the file of the same relative path in your editable SGLang tree,
-#        or:  cp input_validation.py  $SGLANG_ROOT/python/sglang/multimodal_gen/runtime/pipelines_core/stages/
-#
 # Change: Qwen Image Edit (I2I) auto output size — if aspect ratio is extreme (very
 #         narrow portrait or very wide), fall back to 768x1024 before VAE alignment.
 #         Explicit API size (width+height set) is unchanged.
