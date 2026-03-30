@@ -30,8 +30,49 @@ if current_platform.is_cuda():
 
 # Import aiter kernels if available
 if _use_aiter:
-    from aiter import rmsnorm2d_fwd as aiter_rms_norm
-    from aiter import rmsnorm2d_fwd_with_add as aiter_fused_add_rms_norm
+    from sglang.srt.utils.custom_op import register_custom_op
+    from aiter import rmsnorm2d_fwd
+    from aiter import rmsnorm2d_fwd_with_add
+
+    def aiter_rms_norm_fake_impl(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    @register_custom_op(
+        fake_impl=aiter_rms_norm_fake_impl,
+    )
+    def aiter_rms_norm(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
+        assert x.device == weight.device, "x and weight must be on the same device"
+        return rmsnorm2d_fwd(x, weight, eps)
+
+    def aiter_fused_add_rms_norm_fake_impl(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.empty_like(x), torch.empty_like(residual)
+
+    @register_custom_op(
+        fake_impl=aiter_fused_add_rms_norm_fake_impl,
+    )
+    def aiter_fused_add_rms_norm(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        output = torch.empty_like(x)
+        residual_out = torch.empty_like(residual)
+        rmsnorm2d_fwd_with_add(output, x, residual, residual_out, weight, eps)
+        return output, residual_out
 
 
 # Copied and adapted from sglang
@@ -155,26 +196,9 @@ class RMSNorm(CustomOp):
             if residual is not None:
                 return out[0].view(shape), out[1].view(residual_shape)
             return out.view(shape)
-        # Use triton when torch.compile is tracing (aiter kernels are not compatible)
-        if torch._dynamo.is_compiling():
-            out = self.forward_native(x, residual)
-            # forward_native returns tuple if residual is not None
-            if residual is not None:
-                return out[0].view(shape), out[1].view(residual_shape)
-            return out.view(shape)
-        # Use aiter kernels when not compiling
         if _use_aiter:
             if residual is not None:
-                residual_out = torch.empty_like(x)
-                output = torch.empty_like(x)
-                aiter_fused_add_rms_norm(
-                    output,
-                    x,
-                    residual,
-                    residual_out,
-                    self.weight.data,
-                    self.variance_epsilon,
-                )
+                output, residual_out = aiter_fused_add_rms_norm(x, residual, self.weight.data, self.variance_epsilon)
                 return output.view(shape), residual_out.view(residual_shape)
             out = aiter_rms_norm(x, self.weight.data, self.variance_epsilon)
             return out.view(shape)
