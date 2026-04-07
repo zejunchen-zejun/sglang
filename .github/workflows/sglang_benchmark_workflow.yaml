@@ -42,7 +42,7 @@ env:
 
 jobs:
   qwen35:
-    runs-on: sglang-mi308-8gpu
+    runs-on: linux-sglang-mi308-8
     strategy:
       fail-fast: false
       matrix:
