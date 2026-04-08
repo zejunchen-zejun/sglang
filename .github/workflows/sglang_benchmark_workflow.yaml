@@ -47,8 +47,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download SGLang image
+      - name: Prepare SGLang image
         run: |
+          set -euo pipefail
+
+          if docker image inspect "${{ env.IMAGE }}" >/dev/null 2>&1; then
+            echo "Using local image:"
+            docker image ls "${{ env.IMAGE }}"
+            exit 0
+          fi
+
+          echo "Local image not found, trying to pull: ${{ env.IMAGE }}"
+
           if [ -n "${{ secrets.DOCKER_PASSWORD }}" ]; then
             echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u rocmshared --password-stdin || true
           fi
@@ -67,9 +77,14 @@ jobs:
           done
 
           if [ "${pulled}" -ne 1 ]; then
-            echo "docker pull failed after 3 attempts"
+            echo "Failed to find local image and docker pull failed: ${{ env.IMAGE }}"
+            echo "Available local images:"
+            docker image ls --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}' | sort || true
             exit 1
           fi
+
+          echo "Pulled image:"
+          docker image ls "${{ env.IMAGE }}"
 
       - name: Validate model path
         run: |
@@ -124,7 +139,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build --no-cache --network=host -t "sglang_test:ci" -f Dockerfile.mod .
+          docker build --pull=false --no-cache --network=host -t "sglang_test:ci" -f Dockerfile.mod .
 
       - name: Start CI container
         run: |
