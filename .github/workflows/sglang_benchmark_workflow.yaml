@@ -95,14 +95,14 @@ jobs:
             exit 1
           fi
 
-          if [ ! -d "/mnt/raid0/models/offical_qwen3p5_397B_ptpc" ]; then
-            echo "Expected model directory not found: /mnt/raid0/models/offical_qwen3p5_397B_ptpc"
-            ls -lah /mnt/raid0/models
+          if [ ! -d "/models/offical_qwen3p5_397B_ptpc" ]; then
+            echo "Expected model directory not found: /models/offical_qwen3p5_397B_ptpc"
+            ls -lah /models
             exit 1
           fi
 
-          ls -lah /mnt/raid0/models
-          du -sh /mnt/raid0/models/offical_qwen3p5_397B_ptpc
+          ls -lah /models
+          du -sh /models/offical_qwen3p5_397B_ptpc
 
       - name: Generate Dockerfile
         run: |
@@ -161,7 +161,7 @@ jobs:
             --privileged \
             --cap-add=SYS_PTRACE \
             -e SGLANG_VLM_CACHE_SIZE_MB=0 \
-            -v /mnt/raid0/models/offical_qwen3p5_397B_ptpc:/data/models/Qwen/uc/offical_qwen3p5_397B_ptpc:ro \
+            -v /models/offical_qwen3p5_397B_ptpc:/data/models/Qwen/uc/offical_qwen3p5_397B_ptpc:ro \
             --security-opt seccomp=unconfined \
             -w /sglang-checkout \
             --name sglang_test \
