@@ -127,7 +127,7 @@ jobs:
               git rev-parse HEAD && \
               pip install --upgrade pip && \
               cd sgl-kernel && \
-              python setup_rocm.py install && \
+              python3 setup_rocm.py install && \
               cd .. && \
               rm -rf python/pyproject.toml && \
               mv python/pyproject_other.toml python/pyproject.toml && \
