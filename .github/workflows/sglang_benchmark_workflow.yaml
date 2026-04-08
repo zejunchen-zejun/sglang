@@ -38,6 +38,7 @@ env:
 jobs:
   qwen35:
     runs-on: linux-sglang-mi308-8
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -161,7 +162,7 @@ jobs:
             --privileged \
             --cap-add=SYS_PTRACE \
             -e SGLANG_VLM_CACHE_SIZE_MB=0 \
-            -v /models/offical_qwen3p5_397B_ptpc:/data/models/Qwen/uc/offical_qwen3p5_397B_ptpc:ro \
+            -v /models/offical_qwen3p5_397B_ptpc:/models/offical_qwen3p5_397B_ptpc:ro \
             --security-opt seccomp=unconfined \
             -w /sglang-checkout \
             --name sglang_test \
@@ -176,16 +177,16 @@ jobs:
       - name: Show model and shared memory status
         run: |
           docker exec sglang_test bash -lc "df -h /dev/shm"
-          docker exec sglang_test bash -lc "ls -lah /data/models/Qwen/uc"
-          docker exec sglang_test bash -lc "du -sh /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc"
+          docker exec sglang_test bash -lc "ls -lah /models"
+          docker exec sglang_test bash -lc "du -sh /models/offical_qwen3p5_397B_ptpc"
 
       - name: Launch the server
-        timeout-minutes: 120
+        timeout-minutes: 60
         run: |
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc 8 1 90"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} /models/offical_qwen3p5_397B_ptpc 8 1 45"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -193,12 +194,12 @@ jobs:
 
       - name: Run accuracy evaluation
         if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy') }}
-        timeout-minutes: 90
+        timeout-minutes: 45
         run: |
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc 8 1"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} /models/offical_qwen3p5_397B_ptpc 8 1"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -206,12 +207,12 @@ jobs:
 
       - name: Run nightly benchmark
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark') }}
-        timeout-minutes: 90
+        timeout-minutes: 45
         run: |
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh performance ${model_name} /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc 8 1"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh performance ${model_name} /models/offical_qwen3p5_397B_ptpc 8 1"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1

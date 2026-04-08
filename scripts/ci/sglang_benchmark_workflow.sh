@@ -4,10 +4,10 @@ set -euo pipefail
 
 TYPE=${1:-launch}
 MODEL_NAME=${2:-offical_qwen3p5_397B_ptpc}
-MODEL_PATH=${3:-/data/models/Qwen/uc/offical_qwen3p5_397B_ptpc}
+MODEL_PATH=${3:-/models/offical_qwen3p5_397B_ptpc}
 TP=${4:-8}
 EP=${5:-1}
-TIMEOUT=${6:-90}
+TIMEOUT=${6:-45}
 PORT=${SGLANG_BENCHMARK_PORT:-8080}
 MMMU_CONCURRENCY=${SGLANG_BENCHMARK_MMMU_CONCURRENCY:-16}
 SERVER_LOG=${SGLANG_BENCHMARK_SERVER_LOG:-/tmp/sglang_qwen35_server.log}
