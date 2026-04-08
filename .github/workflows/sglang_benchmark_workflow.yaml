@@ -59,8 +59,8 @@ jobs:
 
           echo "Local image not found, trying to pull: ${{ env.IMAGE }}"
 
-          if [ -n "${{ secrets.DOCKER_PASSWORD }}" ]; then
-            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u rocmshared --password-stdin || true
+          if [ -n "${{ secrets.ALISHARED }}" ]; then
+            echo "${{ secrets.ALISHARED }}" | docker login -u alishared --password-stdin || true
           fi
 
           pulled=0
