@@ -24,10 +24,6 @@ on:
         description: 'Image to use for the benchmark'
         required: true
         default: "rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_4d921e5_aiter_6fe675a_qwen3_5_20260327_v2"
-      model_path:
-        description: "Model directory on runner"
-        required: true
-        default: "/mnt/raid0/models/Qwen/uc/offical_qwen3p5_397B_ptpc"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,7 +32,6 @@ concurrency:
 env:
   IMAGE: ${{ github.event.inputs.image || 'rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_4d921e5_aiter_6fe675a_qwen3_5_20260327_v2' }}
   MODEL_NAME: offical_qwen3p5_397B_ptpc
-  MODEL_DIR: ${{ github.event.inputs.model_path || '/mnt/raid0/models/Qwen/uc/offical_qwen3p5_397B_ptpc' }}
   SGLANG_GITHUB_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/zejunchen-zejun/sglang.git' }}
   SGLANG_GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
@@ -85,14 +80,14 @@ jobs:
             exit 1
           fi
 
-          if [ ! -d "${{ env.MODEL_DIR }}" ]; then
-            echo "Expected model directory not found: ${{ env.MODEL_DIR }}"
-            ls -lah "$(dirname "${{ env.MODEL_DIR }}")"
+          if [ ! -d "/mnt/raid0/models/offical_qwen3p5_397B_ptpc" ]; then
+            echo "Expected model directory not found: /mnt/raid0/models/offical_qwen3p5_397B_ptpc"
+            ls -lah /mnt/raid0/models
             exit 1
           fi
 
-          ls -lah "$(dirname "${{ env.MODEL_DIR }}")"
-          du -sh "${{ env.MODEL_DIR }}"
+          ls -lah /mnt/raid0/models
+          du -sh /mnt/raid0/models/offical_qwen3p5_397B_ptpc
 
       - name: Generate Dockerfile
         run: |
@@ -150,7 +145,8 @@ jobs:
             --network=host \
             --privileged \
             --cap-add=SYS_PTRACE \
-            -v /mnt/raid0:/mnt/raid0 \
+            -e SGLANG_VLM_CACHE_SIZE_MB=0 \
+            -v /mnt/raid0/models/offical_qwen3p5_397B_ptpc:/data/models/Qwen/uc/offical_qwen3p5_397B_ptpc:ro \
             --security-opt seccomp=unconfined \
             -w /sglang-checkout \
             --name sglang_test \
@@ -165,8 +161,8 @@ jobs:
       - name: Show model and shared memory status
         run: |
           docker exec sglang_test bash -lc "df -h /dev/shm"
-          docker exec sglang_test bash -lc "ls -lah \"$(dirname '${{ env.MODEL_DIR }}')\""
-          docker exec sglang_test bash -lc "du -sh ${{ env.MODEL_DIR }}"
+          docker exec sglang_test bash -lc "ls -lah /data/models/Qwen/uc"
+          docker exec sglang_test bash -lc "du -sh /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc"
 
       - name: Launch the server
         timeout-minutes: 120
@@ -174,7 +170,7 @@ jobs:
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} ${{ env.MODEL_DIR }} 8 1 90"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc 8 1 90"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -187,7 +183,7 @@ jobs:
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} ${{ env.MODEL_DIR }} 8 1"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc 8 1"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -200,7 +196,7 @@ jobs:
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh performance ${model_name} ${{ env.MODEL_DIR }} 8 1"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh performance ${model_name} /data/models/Qwen/uc/offical_qwen3p5_397B_ptpc 8 1"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1

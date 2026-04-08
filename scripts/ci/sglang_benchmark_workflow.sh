@@ -4,7 +4,7 @@ set -euo pipefail
 
 TYPE=${1:-launch}
 MODEL_NAME=${2:-offical_qwen3p5_397B_ptpc}
-MODEL_PATH=${3:-/mnt/raid0/models/Qwen/uc/offical_qwen3p5_397B_ptpc}
+MODEL_PATH=${3:-/data/models/Qwen/uc/offical_qwen3p5_397B_ptpc}
 TP=${4:-8}
 EP=${5:-1}
 TIMEOUT=${6:-90}
@@ -104,11 +104,11 @@ if [[ "${TYPE}" == "launch" ]]; then
 
   pkill -f "python3 -m sglang.launch_server" || true
   rm -f "${SERVER_LOG}"
+  model="${MODEL_PATH}"
 
   nohup python3 -m sglang.launch_server \
-    --host 0.0.0.0 \
     --port "${PORT}" \
-    --model-path "${MODEL_PATH}" \
+    --model-path "${model}" \
     --tp-size "${TP}" \
     --attention-backend triton \
     --reasoning-parser qwen3 \
