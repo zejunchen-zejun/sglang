@@ -56,7 +56,7 @@ def chunk_gated_delta_rule_fwd(
             k=k, v=v, beta=beta, g=g, cu_seqlens=cu_seqlens
         )
         A = None
-    else:
+     elif _is_hip and T >= 64:
         g, A = fused_cumsum_kkt(g, k, beta, chunk_size=64, cu_seqlens=cu_seqlens)
         chunk_indices_16 = (
             prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
