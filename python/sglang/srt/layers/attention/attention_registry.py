@@ -225,7 +225,10 @@ def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBac
         if get_bool_env_var("SGLANG_USE_AITER_PA"):
             from sglang.srt.layers.attention.aiter_backend import AiterAttnBackend
             return HybridLinearAttnBackend(
-                full_attn_backend, linear_attn_backend, full_attn_layers, AiterAttnBackend(runner)
+                full_attn_backend,
+                linear_attn_backend,
+                full_attn_layers,
+                AiterAttnBackend(runner),
             )
         return HybridLinearAttnBackend(
             full_attn_backend, linear_attn_backend, full_attn_layers
