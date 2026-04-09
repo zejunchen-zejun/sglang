@@ -195,7 +195,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run accuracy evaluation
+      - name: Run GSM8K accuracy evaluation
         if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy') }}
         timeout-minutes: 45
         run: |
@@ -207,6 +207,40 @@ jobs:
             echo "Unknown model_name: ${model_name}"
             exit 1
           fi
+
+      - name: Collect GSM8K accuracy summary
+        if: ${{ success() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy')) }}
+        run: |
+          rm -rf accuracy_test_results
+          docker cp sglang_test:/sglang-checkout/accuracy_test_results ./accuracy_test_results
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          result_files = sorted(
+              pathlib.Path("accuracy_test_results").glob("*_gsm8k_results.json"),
+              key=lambda p: p.stat().st_mtime,
+              reverse=True,
+          )
+          if not result_files:
+              print("ERROR: No GSM8K results JSON file found in accuracy_test_results/", file=sys.stderr)
+              raise SystemExit(2)
+
+          result_file = result_files[0]
+          data = json.loads(result_file.read_text())
+          score = data["results"]["gsm8k"]["exact_match,flexible-extract"]
+
+          print(f"RESULT_FILE: {result_file}")
+          print(f"GSM8K flexible extract score: {score}")
+
+          summary_path = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary_path.open("a", encoding="utf-8") as f:
+              f.write("### GSM8K Accuracy Summary\n")
+              f.write(f"- Result file: `{result_file}`\n")
+              f.write(f"- Score: `{score:.4f}`\n")
+          PY
 
       - name: Run nightly benchmark
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark') }}

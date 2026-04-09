@@ -9,7 +9,9 @@ TP=${4:-8}
 EP=${5:-1}
 TIMEOUT=${6:-45}
 PORT=${SGLANG_BENCHMARK_PORT:-8080}
-MMMU_CONCURRENCY=${SGLANG_BENCHMARK_MMMU_CONCURRENCY:-16}
+GSM8K_NUM_QUESTIONS=${SGLANG_BENCHMARK_GSM8K_NUM_QUESTIONS:-200}
+GSM8K_PARALLEL=${SGLANG_BENCHMARK_GSM8K_PARALLEL:-128}
+ACCURACY_RESULTS_DIR=${SGLANG_BENCHMARK_ACCURACY_RESULTS_DIR:-accuracy_test_results}
 SERVER_LOG=${SGLANG_BENCHMARK_SERVER_LOG:-/tmp/sglang_qwen35_server.log}
 
 export SGLANG_DISABLE_CUDNN_CHECK=1
@@ -132,11 +134,47 @@ if [[ "${TYPE}" == "launch" ]]; then
 
 elif [[ "${TYPE}" == "evaluation" ]]; then
   echo
-  echo "========== STARTING MODEL EVALUATION =========="
-  python3 benchmark/mmmu/bench_sglang.py \
-    --port "${PORT}" \
-    --concurrency "${MMMU_CONCURRENCY}" \
-    | tee "vision_model_evaluation_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+  echo "========== STARTING GSM8K ACCURACY EVALUATION =========="
+  mkdir -p "${ACCURACY_RESULTS_DIR}"
+  MODEL_NAME="${MODEL_NAME}" \
+  PORT="${PORT}" \
+  GSM8K_NUM_QUESTIONS="${GSM8K_NUM_QUESTIONS}" \
+  GSM8K_PARALLEL="${GSM8K_PARALLEL}" \
+  ACCURACY_RESULTS_DIR="${ACCURACY_RESULTS_DIR}" \
+  python3 - <<'PY' | tee "gsm8k_accuracy_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+import json
+import os
+from types import SimpleNamespace
+
+from sglang.test.few_shot_gsm8k import run_eval
+
+metrics = run_eval(
+    SimpleNamespace(
+        num_shots=5,
+        data_path=None,
+        num_questions=int(os.environ["GSM8K_NUM_QUESTIONS"]),
+        max_new_tokens=512,
+        parallel=int(os.environ["GSM8K_PARALLEL"]),
+        host="http://127.0.0.1",
+        port=int(os.environ["PORT"]),
+        temperature=0.0,
+    )
+)
+
+result_path = os.path.join(
+    os.environ["ACCURACY_RESULTS_DIR"], f'{os.environ["MODEL_NAME"]}_gsm8k_results.json'
+)
+payload = {
+    "results": {"gsm8k": {"exact_match,flexible-extract": metrics["accuracy"]}},
+    "metrics": metrics,
+}
+
+with open(result_path, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2)
+
+print(f"Wrote GSM8K results to {result_path}")
+print(json.dumps(payload, indent=2))
+PY
 
 elif [[ "${TYPE}" == "performance" ]]; then
   echo
