@@ -48,6 +48,7 @@ if _use_aiter:
     from aiter import rmsnorm2d_fwd as aiter_rms_norm
     from aiter import rmsnorm2d_fwd_with_add as aiter_fused_add_rms_norm
 
+
 # Copied and adapted from sglang
 @CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
@@ -365,9 +366,22 @@ class _ScaleResidualNormScaleShift(CustomOp):
         if self.norm_type == "rms":
             self.norm = RMSNorm(hidden_size, eps=eps, dtype=dtype)
         elif self.norm_type == "layer":
-            self.norm = FP32LayerNorm(
-                hidden_size, elementwise_affine=elementwise_affine, eps=eps, dtype=dtype
-            )
+            if _is_hip:
+                # On ROCm, keep using the existing Triton LayerNorm fast path instead
+                # of falling back to FP32 F.layer_norm inside the wrapper.
+                self.norm = LayerNorm(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    eps=eps,
+                    dtype=dtype,
+                )
+            else:
+                self.norm = FP32LayerNorm(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    eps=eps,
+                    dtype=dtype,
+                )
         else:
             raise NotImplementedError(f"Norm type {self.norm_type} not implemented")
 
@@ -400,7 +414,9 @@ class _ScaleResidualNormScaleShift(CustomOp):
         if shift is None and scale is None:
             return self.forward_native(residual, x, gate, shift, scale)
 
-        assert shift is not None and scale is not None, "shift and scale must be provided"
+        assert (
+            shift is not None and scale is not None
+        ), "shift and scale must be provided"
         return fused_scale_residual_norm_scale_shift(
             residual.contiguous(),
             x.contiguous(),
@@ -448,7 +464,9 @@ class _ScaleResidualNormScaleShift(CustomOp):
         if shift is None and scale is None:
             return normalized, residual_output
 
-        assert shift is not None and scale is not None, "shift and scale must be provided"
+        assert (
+            shift is not None and scale is not None
+        ), "shift and scale must be provided"
         modulated = fuse_scale_shift_kernel(
             normalized,
             scale,
@@ -488,9 +506,22 @@ class _NormScaleShift(CustomOp):
         if self.norm_type == "rms":
             self.norm = RMSNorm(hidden_size, eps=eps, dtype=dtype)
         elif self.norm_type == "layer":
-            self.norm = FP32LayerNorm(
-                hidden_size, elementwise_affine=elementwise_affine, eps=eps, dtype=dtype
-            )
+            if _is_hip:
+                # Match the old ROCm-optimized Qwen-Image path by reusing LayerNorm's
+                # Triton implementation inside the scale/shift wrapper.
+                self.norm = LayerNorm(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    eps=eps,
+                    dtype=dtype,
+                )
+            else:
+                self.norm = FP32LayerNorm(
+                    hidden_size,
+                    elementwise_affine=elementwise_affine,
+                    eps=eps,
+                    dtype=dtype,
+                )
         else:
             raise NotImplementedError(f"Norm type {self.norm_type} not implemented")
 

@@ -85,6 +85,7 @@ def build_sampling_params(request_id: str, **kwargs) -> SamplingParams:
 
     # pop HTTP-layer params that aren't SamplingParams fields
     output_quality = kwargs.pop("output_quality", None)
+    explicit_guidance_scale = kwargs.get("guidance_scale")
 
     has_explicit_compression = kwargs.get("output_compression") is not None
 
@@ -106,6 +107,12 @@ def build_sampling_params(request_id: str, **kwargs) -> SamplingParams:
         request_id=request_id,
         **kwargs,
     )
+
+    # Preserve an explicit guidance_scale=1.0 from HTTP callers. The generic merge
+    # path compares against base SamplingParams defaults, so model-specific defaults
+    # like QwenImageEditPlusSamplingParams.guidance_scale=4.0 would otherwise win.
+    if explicit_guidance_scale is not None:
+        sampling_params.guidance_scale = explicit_guidance_scale
 
     # resolve output_quality → output_compression with the correct data_type.
     # SamplingParams.__post_init__ may have resolved with the wrong data_type
