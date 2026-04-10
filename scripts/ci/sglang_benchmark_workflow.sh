@@ -202,6 +202,47 @@ else:
 PY
 }
 
+patch_request_rate_wrapper_invocation() {
+  local work_dir=${1}
+  local wrapper_path="${work_dir}/run_benchmark_serving_wrapper.py"
+  local run_script="${work_dir}/run.sh"
+
+  if [[ ! -f "${wrapper_path}" || ! -f "${run_script}" ]]; then
+    return 0
+  fi
+
+  if python3 -m py_compile "${wrapper_path}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Detected non-Python request rate wrapper, patching run.sh to execute it with bash."
+  chmod +x "${wrapper_path}"
+  python3 - "${run_script}" <<'PY'
+import pathlib
+import re
+import sys
+
+run_script = pathlib.Path(sys.argv[1])
+text = run_script.read_text(encoding="utf-8")
+updated = re.sub(
+    r'python3?\s+\.?/run_benchmark_serving_wrapper\.py',
+    'bash ./run_benchmark_serving_wrapper.py',
+    text,
+)
+updated = re.sub(
+    r'python3?\s+run_benchmark_serving_wrapper\.py',
+    'bash ./run_benchmark_serving_wrapper.py',
+    updated,
+)
+
+if updated != text:
+    run_script.write_text(updated, encoding="utf-8")
+    print(f"Patched request rate launcher: {run_script}")
+else:
+    print(f"WARNING: Did not find request rate wrapper invocation in {run_script}")
+PY
+}
+
 run_external_benchmark() {
   local benchmark_type=${1}
   local source_dir="${BENCHMARK_EXAMPLE_ROOT}/${benchmark_type}"
@@ -222,6 +263,9 @@ run_external_benchmark() {
   cp -a "${source_dir}/." "${work_dir}/"
   chmod -R u+w "${work_dir}"
   rewrite_external_benchmark_files "${work_dir}"
+  if [[ "${benchmark_type}" == "request_rate" ]]; then
+    patch_request_rate_wrapper_invocation "${work_dir}"
+  fi
 
   (
     cd "${work_dir}"
