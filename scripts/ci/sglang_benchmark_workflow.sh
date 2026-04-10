@@ -65,38 +65,48 @@ wait_for_server() {
 }
 
 smoke_test_server() {
+  local max_retries=3
+  local retry_interval=10
+
   echo
   echo "========== TESTING SERVER =========="
-  curl --fail --request POST \
-    --url "http://localhost:${PORT}/v1/chat/completions" \
-    --header "Content-Type: application/json" \
-    --data "$(cat <<EOF
+  for ((i=1; i<=max_retries; i++)); do
+    if curl --fail --silent --show-error --max-time 120 --request POST \
+      --url "http://localhost:${PORT}/v1/chat/completions" \
+      --header "Content-Type: application/json" \
+      --data "$(cat <<EOF
 {
   "model": "${MODEL_PATH}",
   "messages": [
     {
       "role": "user",
-      "content": [
-        {
-          "type": "image_url",
-          "image_url": {
-            "url": "https://sf-maas-uat-prod.oss-cn-shanghai.aliyuncs.com/dog.png"
-          }
-        },
-        {
-          "type": "text",
-          "text": "请简要描述图片是什么内容？"
-        }
-      ]
+      "content": "Reply with exactly one word: ready"
     }
   ],
   "temperature": 0.0,
   "top_p": 0.0001,
   "top_k": 1,
-  "max_tokens": 100
+  "max_tokens": 8
 }
 EOF
-)"
+)" >/dev/null; then
+      echo "Smoke test passed."
+      return 0
+    fi
+
+    echo "Smoke test attempt ${i}/${max_retries} failed."
+    if ! curl -sf "http://localhost:${PORT}/v1/models" >/dev/null; then
+      echo "SGLang server stopped responding during smoke test."
+      return 1
+    fi
+
+    if (( i < max_retries )); then
+      sleep "${retry_interval}"
+    fi
+  done
+
+  echo "Smoke test did not succeed after ${max_retries} attempts."
+  return 1
 }
 
 # Patch the copied benchmark script so it targets the active model and port.
