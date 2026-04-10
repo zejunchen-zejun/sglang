@@ -109,18 +109,17 @@ EOF
   return 1
 }
 
-# Patch the copied benchmark script so it targets the active model and port.
-rewrite_external_benchmark_script() {
-  local script_path=${1}
-  python3 - "${script_path}" "${MODEL_PATH}" "${PORT}" <<'PY'
+# Patch the copied benchmark files so they target the active model and port.
+rewrite_external_benchmark_files() {
+  local benchmark_root=${1}
+  python3 - "${benchmark_root}" "${MODEL_PATH}" "${PORT}" <<'PY'
 import pathlib
 import re
 import sys
 
-script_path = pathlib.Path(sys.argv[1])
+benchmark_root = pathlib.Path(sys.argv[1])
 model_path = sys.argv[2]
 port = sys.argv[3]
-text = script_path.read_text(encoding="utf-8")
 
 model_patterns = [
     (
@@ -137,6 +136,12 @@ model_patterns = [
     (
         re.compile(r'(--model(?!-path)(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
         lambda m: f'{m.group(1)}"{model_path}"',
+    ),
+    (
+        re.compile(
+            r'/(?:data/|mnt/raid0/)?models/(?!benchamark_example\b|benchmark_example\b)[^\s"\'\\]+'
+        ),
+        lambda _: model_path,
     ),
 ]
 
@@ -162,35 +167,38 @@ port_patterns = [
     ),
 ]
 
-updated = text
-model_updates = 0
-for pattern, repl in model_patterns:
-    updated, count = pattern.subn(repl, updated)
-    model_updates += count
+updated_files = []
+for path in sorted(benchmark_root.rglob("*")):
+    if not path.is_file():
+        continue
 
-if model_updates == 0:
-    fallback_model_pattern = re.compile(
-        r'/models/(?!benchamark_example\b|benchmark_example\b)[^\s"\'\\]+'
-    )
-    updated, fallback_count = fallback_model_pattern.subn(model_path, updated, count=1)
-    model_updates += fallback_count
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
 
-port_updates = 0
-for pattern, repl in port_patterns:
-    updated, count = pattern.subn(repl, updated)
-    port_updates += count
+    updated = text
+    model_updates = 0
+    for pattern, repl in model_patterns:
+        updated, count = pattern.subn(repl, updated)
+        model_updates += count
 
-if updated != text:
-    script_path.write_text(updated, encoding="utf-8")
+    port_updates = 0
+    for pattern, repl in port_patterns:
+        updated, count = pattern.subn(repl, updated)
+        port_updates += count
 
-print(f"Prepared benchmark script: {script_path}")
-print(f"Applied model replacements: {model_updates}")
-print(f"Applied port replacements: {port_updates}")
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+        updated_files.append((path.relative_to(benchmark_root), model_updates, port_updates))
 
-if model_updates == 0:
-    print("WARNING: No explicit model replacement matched; relying on exported env vars.")
-if port_updates == 0:
-    print("WARNING: No explicit port replacement matched; relying on exported env vars.")
+if not updated_files:
+    print(f"WARNING: No benchmark files required rewriting under {benchmark_root}")
+else:
+    for rel_path, model_updates, port_updates in updated_files:
+        print(f"Prepared benchmark file: {benchmark_root / rel_path}")
+        print(f"Applied model replacements: {model_updates}")
+        print(f"Applied port replacements: {port_updates}")
 PY
 }
 
@@ -213,7 +221,7 @@ run_external_benchmark() {
   work_dir=$(mktemp -d "/tmp/sglang_external_${benchmark_type}.XXXXXX")
   cp -a "${source_dir}/." "${work_dir}/"
   chmod -R u+w "${work_dir}"
-  rewrite_external_benchmark_script "${work_dir}/run.sh"
+  rewrite_external_benchmark_files "${work_dir}"
 
   (
     cd "${work_dir}"
