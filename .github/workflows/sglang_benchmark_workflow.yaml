@@ -32,13 +32,17 @@ concurrency:
 env:
   IMAGE: ${{ github.event.inputs.image || 'rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_4d921e5_aiter_6fe675a_qwen3_5_20260327_v2' }}
   MODEL_NAME: offical_qwen3p5_397B_ptpc
+  MODEL_PATH: /models/offical_qwen3p5_397B_ptpc
+  SGLANG_BENCHMARK_PORT: "8080"
+  SGLANG_BENCHMARK_EXAMPLE_ROOT: /models/benchamark_example
+  SGLANG_BENCHMARK_RESULTS_DIR: benchmark_test_results
   SGLANG_GITHUB_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url || 'https://github.com/zejunchen-zejun/sglang.git' }}
   SGLANG_GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   qwen35:
     runs-on: linux-sglang-mi308-8
-    timeout-minutes: 150
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -96,14 +100,30 @@ jobs:
             exit 1
           fi
 
-          if [ ! -d "/models/offical_qwen3p5_397B_ptpc" ]; then
-            echo "Expected model directory not found: /models/offical_qwen3p5_397B_ptpc"
+          if [ ! -d "${{ env.MODEL_PATH }}" ]; then
+            echo "Expected model directory not found: ${{ env.MODEL_PATH }}"
             ls -lah /models
             exit 1
           fi
 
           ls -lah /models
-          du -sh /models/offical_qwen3p5_397B_ptpc
+          du -sh "${{ env.MODEL_PATH }}"
+
+      - name: Validate benchmark scripts
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark') }}
+        run: |
+          set -euo pipefail
+
+          for script_path in \
+            "${{ env.SGLANG_BENCHMARK_EXAMPLE_ROOT }}/concurrency/run.sh" \
+            "${{ env.SGLANG_BENCHMARK_EXAMPLE_ROOT }}/request_rate/run.sh"; do
+            if [ ! -f "${script_path}" ]; then
+              echo "Expected benchmark script not found: ${script_path}"
+              exit 1
+            fi
+          done
+
+          ls -lah "${{ env.SGLANG_BENCHMARK_EXAMPLE_ROOT }}"
 
       - name: Generate Dockerfile
         run: |
@@ -165,7 +185,10 @@ jobs:
             --privileged \
             --cap-add=SYS_PTRACE \
             -e SGLANG_VLM_CACHE_SIZE_MB=0 \
-            -v /models/offical_qwen3p5_397B_ptpc:/models/offical_qwen3p5_397B_ptpc:ro \
+            -e SGLANG_BENCHMARK_PORT=${{ env.SGLANG_BENCHMARK_PORT }} \
+            -e SGLANG_BENCHMARK_EXAMPLE_ROOT=${{ env.SGLANG_BENCHMARK_EXAMPLE_ROOT }} \
+            -e SGLANG_BENCHMARK_RESULTS_DIR=${{ env.SGLANG_BENCHMARK_RESULTS_DIR }} \
+            -v /models:/models:ro \
             --security-opt seccomp=unconfined \
             -w /sglang-checkout \
             --name sglang_test \
@@ -181,7 +204,7 @@ jobs:
         run: |
           docker exec sglang_test bash -lc "df -h /dev/shm"
           docker exec sglang_test bash -lc "ls -lah /models"
-          docker exec sglang_test bash -lc "du -sh /models/offical_qwen3p5_397B_ptpc"
+          docker exec sglang_test bash -lc "du -sh ${{ env.MODEL_PATH }}"
 
       - name: Launch the server
         timeout-minutes: 60
@@ -189,7 +212,7 @@ jobs:
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} /models/offical_qwen3p5_397B_ptpc 8 1 45"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -202,7 +225,7 @@ jobs:
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} /models/offical_qwen3p5_397B_ptpc 8 1"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} ${{ env.MODEL_PATH }} 8 1"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
@@ -242,18 +265,69 @@ jobs:
               f.write(f"- Score: `{score:.4f}`\n")
           PY
 
-      - name: Run nightly benchmark
+      - name: Run nightly load tests
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark') }}
-        timeout-minutes: 45
+        timeout-minutes: 90
         run: |
           set -ex
           model_name=${{ matrix.model }}
           if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh performance ${model_name} /models/offical_qwen3p5_397B_ptpc 8 1"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh concurrency ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
+            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh request_rate ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
           else
             echo "Unknown model_name: ${model_name}"
             exit 1
           fi
+
+      - name: Collect benchmark summary
+        if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark')) }}
+        run: |
+          python3 <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import subprocess
+
+          results_dir = pathlib.Path(os.environ["SGLANG_BENCHMARK_RESULTS_DIR"])
+          if results_dir.exists():
+              shutil.rmtree(results_dir)
+
+          subprocess.run(
+              [
+                  "docker",
+                  "cp",
+                  f"sglang_test:/sglang-checkout/{results_dir}",
+                  str(results_dir),
+              ],
+              check=False,
+          )
+
+          if not results_dir.exists():
+              print(f"No benchmark results copied from container: {results_dir}")
+              raise SystemExit(0)
+
+          log_files = sorted(results_dir.glob("*.log"))
+          if not log_files:
+              print(f"No benchmark logs found in {results_dir}")
+              raise SystemExit(0)
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if not summary_path:
+              for log_file in log_files:
+                  print(f"Collected benchmark log: {log_file}")
+              raise SystemExit(0)
+
+          with open(summary_path, "a", encoding="utf-8") as f:
+              f.write("### Qwen3.5 Load Test Summary\n")
+              for log_file in log_files:
+                  f.write(f"- Log: `{log_file}`\n")
+                  f.write("```text\n")
+                  tail_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+                  if tail_lines:
+                      f.write("\n".join(tail_lines))
+                      f.write("\n")
+                  f.write("```\n")
+          PY
 
       - name: Clean up
         if: always()

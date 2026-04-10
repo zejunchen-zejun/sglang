@@ -13,6 +13,8 @@ GSM8K_NUM_QUESTIONS=${SGLANG_BENCHMARK_GSM8K_NUM_QUESTIONS:-200}
 GSM8K_PARALLEL=${SGLANG_BENCHMARK_GSM8K_PARALLEL:-128}
 ACCURACY_RESULTS_DIR=${SGLANG_BENCHMARK_ACCURACY_RESULTS_DIR:-accuracy_test_results}
 SERVER_LOG=${SGLANG_BENCHMARK_SERVER_LOG:-/tmp/sglang_qwen35_server.log}
+BENCHMARK_RESULTS_DIR=${SGLANG_BENCHMARK_RESULTS_DIR:-benchmark_test_results}
+BENCHMARK_EXAMPLE_ROOT=${SGLANG_BENCHMARK_EXAMPLE_ROOT:-/models/benchamark_example}
 
 export SGLANG_DISABLE_CUDNN_CHECK=1
 export SGLANG_USE_CUDA_IPC_TRANSPORT=1
@@ -30,6 +32,8 @@ echo "Detect TP: ${TP}"
 echo "Detect EP: ${EP}"
 echo "Detect TIMEOUT: ${TIMEOUT}"
 echo "Detect PORT: ${PORT}"
+echo "Detect benchmark_example_root: ${BENCHMARK_EXAMPLE_ROOT}"
+echo "Detect benchmark_results_dir: ${BENCHMARK_RESULTS_DIR}"
 
 wait_for_server() {
   local max_retries=${1}
@@ -93,6 +97,123 @@ smoke_test_server() {
 }
 EOF
 )"
+}
+
+# Patch the copied benchmark script so it targets the active model and port.
+rewrite_external_benchmark_script() {
+  local script_path=${1}
+  python3 - "${script_path}" "${MODEL_PATH}" "${PORT}" <<'PY'
+import pathlib
+import re
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+model_path = sys.argv[2]
+port = sys.argv[3]
+text = script_path.read_text(encoding="utf-8")
+
+model_patterns = [
+    (
+        re.compile(
+            r'(^\s*(?:MODEL_PATH|MODEL|model_path|model)\s*=\s*)(?:"[^"]*"|\'[^\']*\'|[^\s#]+)',
+            re.MULTILINE,
+        ),
+        lambda m: f'{m.group(1)}"{model_path}"',
+    ),
+    (
+        re.compile(r'(--model-path(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
+        lambda m: f'{m.group(1)}"{model_path}"',
+    ),
+    (
+        re.compile(r'(--model(?!-path)(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
+        lambda m: f'{m.group(1)}"{model_path}"',
+    ),
+]
+
+port_patterns = [
+    (
+        re.compile(
+            r'(^\s*(?:PORT|port)\s*=\s*)(?:"[^"]*"|\'[^\']*\'|[^\s#]+)',
+            re.MULTILINE,
+        ),
+        lambda m: f'{m.group(1)}"{port}"',
+    ),
+    (
+        re.compile(r'(--port(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
+        lambda m: f'{m.group(1)}"{port}"',
+    ),
+    (
+        re.compile(r'(https?://localhost:)\d+'),
+        lambda m: f'{m.group(1)}{port}',
+    ),
+    (
+        re.compile(r'(https?://127\.0\.0\.1:)\d+'),
+        lambda m: f'{m.group(1)}{port}',
+    ),
+]
+
+updated = text
+model_updates = 0
+for pattern, repl in model_patterns:
+    updated, count = pattern.subn(repl, updated)
+    model_updates += count
+
+if model_updates == 0:
+    fallback_model_pattern = re.compile(
+        r'/models/(?!benchamark_example\b|benchmark_example\b)[^\s"\'\\]+'
+    )
+    updated, fallback_count = fallback_model_pattern.subn(model_path, updated, count=1)
+    model_updates += fallback_count
+
+port_updates = 0
+for pattern, repl in port_patterns:
+    updated, count = pattern.subn(repl, updated)
+    port_updates += count
+
+if updated != text:
+    script_path.write_text(updated, encoding="utf-8")
+
+print(f"Prepared benchmark script: {script_path}")
+print(f"Applied model replacements: {model_updates}")
+print(f"Applied port replacements: {port_updates}")
+
+if model_updates == 0:
+    print("WARNING: No explicit model replacement matched; relying on exported env vars.")
+if port_updates == 0:
+    print("WARNING: No explicit port replacement matched; relying on exported env vars.")
+PY
+}
+
+run_external_benchmark() {
+  local benchmark_type=${1}
+  local source_dir="${BENCHMARK_EXAMPLE_ROOT}/${benchmark_type}"
+  local source_script="${source_dir}/run.sh"
+  local work_dir
+  local log_path="${BENCHMARK_RESULTS_DIR}/${benchmark_type}_benchmark_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+
+  echo
+  echo "========== STARTING ${benchmark_type^^} BENCHMARK =========="
+
+  if [[ ! -f "${source_script}" ]]; then
+    echo "Benchmark script not found: ${source_script}"
+    exit 1
+  fi
+
+  mkdir -p "${BENCHMARK_RESULTS_DIR}"
+  work_dir=$(mktemp -d "/tmp/sglang_external_${benchmark_type}.XXXXXX")
+  cp -a "${source_dir}/." "${work_dir}/"
+  chmod -R u+w "${work_dir}"
+  rewrite_external_benchmark_script "${work_dir}/run.sh"
+
+  (
+    cd "${work_dir}"
+    export MODEL="${MODEL_PATH}"
+    export MODEL_PATH="${MODEL_PATH}"
+    export PORT="${PORT}"
+    export SGLANG_BENCHMARK_MODEL_PATH="${MODEL_PATH}"
+    export SGLANG_BENCHMARK_PORT="${PORT}"
+    bash "./run.sh"
+  ) | tee "${log_path}"
 }
 
 if [[ "${TYPE}" == "launch" ]]; then
@@ -176,9 +297,13 @@ print(f"Wrote GSM8K results to {result_path}")
 print(json.dumps(payload, indent=2))
 PY
 
+elif [[ "${TYPE}" == "concurrency" || "${TYPE}" == "request_rate" ]]; then
+  run_external_benchmark "${TYPE}"
+
 elif [[ "${TYPE}" == "performance" ]]; then
   echo
   echo "========== STARTING PERFORMANCE BENCHMARK =========="
+  mkdir -p "${BENCHMARK_RESULTS_DIR}"
   python3 -m sglang.bench_serving \
     --backend sglang-oai-chat \
     --port "${PORT}" \
@@ -191,11 +316,11 @@ elif [[ "${TYPE}" == "performance" ]]; then
     --random-output-len 650 \
     --max-concurrency 1 \
     --random-range-ratio 1.0 \
-    | tee "performance_benchmark_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+    | tee "${BENCHMARK_RESULTS_DIR}/performance_benchmark_${MODEL_NAME}_TP${TP}_EP${EP}.log"
 
 else
   echo "Unknown TYPE: ${TYPE}"
-  echo "Usage: $0 {launch|evaluation|performance} [model_name] [model_path] [TP] [EP] [timeout]"
+  echo "Usage: $0 {launch|evaluation|concurrency|request_rate|performance} [model_name] [model_path] [TP] [EP] [timeout]"
   exit 1
 fi
 
