@@ -34,7 +34,6 @@ from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiT
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.srt.environ import envs
 
-
 logger = init_logger(__name__)  # pylint: disable=invalid-name
 _is_cuda = current_platform.is_cuda()
 
@@ -582,7 +581,7 @@ class QwenImageCrossAttention(nn.Module):
                 device=img_key.device,
             )
             joint_value = torch.cat([txt_value, img_value], dim=1)
-            aiter.fused_rope_rms_2way(
+            aiter.fused_qk_norm_rope_2way(
                 txt_query.contiguous(),
                 txt_key.contiguous(),
                 img_query.contiguous(),
@@ -680,7 +679,9 @@ class QwenImageTransformerBlock(nn.Module):
         # Image processing modules
         self.img_mod = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(dim, 6 * dim, bias=True),  # For scale, shift, gate for norm1 and norm2
+            nn.Linear(
+                dim, 6 * dim, bias=True
+            ),  # For scale, shift, gate for norm1 and norm2
         )
         self.img_norm1 = LayerNorm(dim, elementwise_affine=False, eps=eps)
 
@@ -699,7 +700,9 @@ class QwenImageTransformerBlock(nn.Module):
         # Text processing modules
         self.txt_mod = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(dim, 6 * dim, bias=True),  # For scale, shift, gate for norm1 and norm2
+            nn.Linear(
+                dim, 6 * dim, bias=True
+            ),  # For scale, shift, gate for norm1 and norm2
         )
         self.txt_norm1 = LayerNorm(dim, elementwise_affine=False, eps=eps)
         # Text doesn't need separate attention - it's handled by img_attn joint computation
@@ -893,7 +896,7 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
 
         self.img_in = nn.Linear(in_channels, self.inner_dim)
         self.txt_in = nn.Linear(joint_attention_dim, self.inner_dim)
-        
+
         self.transformer_blocks = nn.ModuleList(
             [
                 QwenImageTransformerBlock(
@@ -909,7 +912,9 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         self.norm_out = AdaLayerNormContinuous(
             self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6
         )
-        self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
+        self.proj_out = nn.Linear(
+            self.inner_dim, patch_size * patch_size * self.out_channels, bias=True
+        )
 
         self.timestep_zero = torch.zeros(
             (1,), dtype=torch.int, device=get_local_torch_device()
@@ -931,16 +936,22 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         modulate_index_list = []
         for sample in img_shapes:
             noisy_size = sample[0][0] * sample[0][1] * sample[0][2]
-            cond_size = sum(s[0] * s[1] * s[2] for s in sample[1:]) if len(sample) > 1 else 0
+            cond_size = (
+                sum(s[0] * s[1] * s[2] for s in sample[1:]) if len(sample) > 1 else 0
+            )
 
             if sp_world_size > 1:
                 # Shard noisy and condition tokens separately, then concatenate
                 noisy_local_size = noisy_size // sp_world_size
                 cond_local_size = cond_size // sp_world_size if cond_size > 0 else 0
 
-                noisy_idx = torch.zeros(noisy_local_size, device=device, dtype=torch.int)
+                noisy_idx = torch.zeros(
+                    noisy_local_size, device=device, dtype=torch.int
+                )
                 if cond_local_size > 0:
-                    cond_idx = torch.ones(cond_local_size, device=device, dtype=torch.int)
+                    cond_idx = torch.ones(
+                        cond_local_size, device=device, dtype=torch.int
+                    )
                     idx = torch.cat([noisy_idx, cond_idx], dim=0)
                 else:
                     idx = noisy_idx
