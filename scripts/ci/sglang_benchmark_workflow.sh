@@ -145,11 +145,11 @@ model_patterns = [
         lambda m: preserve_quote_replacement(m, model_path),
     ),
     (
-        re.compile(r'(--model-path(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
+        re.compile(r'(--model-path(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\\"\')]+)'),
         lambda m: f'{m.group(1)}{model_path}',
     ),
     (
-        re.compile(r'(--model(?!-path)(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
+        re.compile(r'(--model(?!-path)(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\\"\')]+)'),
         lambda m: f'{m.group(1)}{model_path}',
     ),
     (
@@ -169,7 +169,7 @@ port_patterns = [
         lambda m: preserve_quote_replacement(m, port),
     ),
     (
-        re.compile(r'(--port(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
+        re.compile(r'(--port(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\\"\')]+)'),
         lambda m: f'{m.group(1)}{port}',
     ),
     (
@@ -311,7 +311,7 @@ run_external_benchmark() {
     export PORT="${PORT}"
     export SGLANG_BENCHMARK_MODEL_PATH="${MODEL_PATH}"
     export SGLANG_BENCHMARK_PORT="${PORT}"
-    bash "./run.sh"
+    bash -euo pipefail "./run.sh"
   ) | tee "${log_path}"
 }
 
