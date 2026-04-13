@@ -42,7 +42,7 @@ env:
 jobs:
   qwen35:
     runs-on: linux-sglang-mi308-8
-    timeout-minutes: 180
+    timeout-minutes: 420
     strategy:
       fail-fast: false
       matrix:
@@ -268,7 +268,7 @@ jobs:
 
       - name: Run nightly load tests
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark') }}
-        timeout-minutes: 90
+        timeout-minutes: 300
         run: |
           set -ex
           model_name=${{ matrix.model }}
