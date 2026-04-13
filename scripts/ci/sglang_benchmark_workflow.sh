@@ -118,6 +118,7 @@ rewrite_external_benchmark_files() {
   local benchmark_root=${1}
   python3 - "${benchmark_root}" "${MODEL_PATH}" "${PORT}" <<'PY'
 import pathlib
+import py_compile
 import re
 import sys
 
@@ -125,21 +126,31 @@ benchmark_root = pathlib.Path(sys.argv[1])
 model_path = sys.argv[2]
 port = sys.argv[3]
 
+
+def preserve_quote_replacement(match, new_value):
+    prefix = match.group(1)
+    original_value = match.group(0)[len(prefix):]
+    if original_value.startswith('"') and original_value.endswith('"'):
+        return f'{prefix}"{new_value}"'
+    if original_value.startswith("'") and original_value.endswith("'"):
+        return f"{prefix}'{new_value}'"
+    return f"{prefix}{new_value}"
+
 model_patterns = [
     (
         re.compile(
             r'(^\s*(?:MODEL_PATH|MODEL|model_path|model)\s*=\s*)(?:"[^"]*"|\'[^\']*\'|[^\s#]+)',
             re.MULTILINE,
         ),
-        lambda m: f'{m.group(1)}"{model_path}"',
+        lambda m: preserve_quote_replacement(m, model_path),
     ),
     (
         re.compile(r'(--model-path(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
-        lambda m: f'{m.group(1)}"{model_path}"',
+        lambda m: f'{m.group(1)}{model_path}',
     ),
     (
         re.compile(r'(--model(?!-path)(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
-        lambda m: f'{m.group(1)}"{model_path}"',
+        lambda m: f'{m.group(1)}{model_path}',
     ),
     (
         re.compile(
@@ -155,11 +166,11 @@ port_patterns = [
             r'(^\s*(?:PORT|port)\s*=\s*)(?:"[^"]*"|\'[^\']*\'|[^\s#]+)',
             re.MULTILINE,
         ),
-        lambda m: f'{m.group(1)}"{port}"',
+        lambda m: preserve_quote_replacement(m, port),
     ),
     (
         re.compile(r'(--port(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\]+)'),
-        lambda m: f'{m.group(1)}"{port}"',
+        lambda m: f'{m.group(1)}{port}',
     ),
     (
         re.compile(r'(https?://localhost:)\d+'),
@@ -196,6 +207,30 @@ for path in sorted(benchmark_root.rglob("*")):
         path.write_text(updated, encoding="utf-8")
         updated_files.append((path.relative_to(benchmark_root), model_updates, port_updates))
 
+    if path.suffix == ".py":
+        try:
+            py_compile.compile(str(path), doraise=True)
+        except py_compile.PyCompileError:
+            repaired = path.read_text(encoding="utf-8")
+            repaired = re.sub(
+                r'(--model-path(?:=|\s+))"([^"\n]+)"',
+                r"\1\2",
+                repaired,
+            )
+            repaired = re.sub(
+                r'(--model(?!-path)(?:=|\s+))"([^"\n]+)"',
+                r"\1\2",
+                repaired,
+            )
+            repaired = re.sub(
+                r'(--port(?:=|\s+))"([^"\n]+)"',
+                r"\1\2",
+                repaired,
+            )
+            if repaired != path.read_text(encoding="utf-8"):
+                path.write_text(repaired, encoding="utf-8")
+                updated_files.append((path.relative_to(benchmark_root), 0, 0))
+
 if not updated_files:
     print(f"WARNING: No benchmark files required rewriting under {benchmark_root}")
 else:
@@ -209,7 +244,6 @@ PY
 patch_request_rate_wrapper_invocation() {
   local work_dir=${1}
   local wrapper_path="${work_dir}/run_benchmark_serving_wrapper.py"
-  local shell_wrapper_path="${work_dir}/run_benchmark_serving_wrapper.sh"
 
   if [[ ! -f "${wrapper_path}" ]]; then
     return 0
@@ -219,28 +253,31 @@ patch_request_rate_wrapper_invocation() {
     return 0
   fi
 
-  echo "Detected non-Python request rate wrapper, replacing it with a Python shim."
-  mv "${wrapper_path}" "${shell_wrapper_path}"
-  chmod +x "${shell_wrapper_path}"
-  python3 - "${wrapper_path}" "$(basename "${shell_wrapper_path}")" <<'PY'
+  echo "Request rate wrapper still fails Python compile, sanitizing rewritten CLI quoting."
+  python3 - "${wrapper_path}" <<'PY'
 import pathlib
+import re
 import sys
 
 wrapper_path = pathlib.Path(sys.argv[1])
-shell_wrapper_name = sys.argv[2]
-wrapper_path.write_text(
-    "#!/usr/bin/env python3\n"
-    "import pathlib\n"
-    "import subprocess\n"
-    "import sys\n"
-    "\n"
-    "script_dir = pathlib.Path(__file__).resolve().parent\n"
-    f"shell_wrapper = script_dir / {shell_wrapper_name!r}\n"
-    "raise SystemExit(subprocess.call([\"bash\", str(shell_wrapper), *sys.argv[1:]]))\n",
-    encoding="utf-8",
+text = wrapper_path.read_text(encoding="utf-8")
+updated = re.sub(
+    r'(--model-path(?:=|\s+))"([^"\n]+)"',
+    r"\1\2",
+    text,
 )
+updated = re.sub(
+    r'(--model(?!-path)(?:=|\s+))"([^"\n]+)"',
+    r"\1\2",
+    updated,
+)
+updated = re.sub(
+    r'(--port(?:=|\s+))"([^"\n]+)"',
+    r"\1\2",
+    updated,
+)
+wrapper_path.write_text(updated, encoding="utf-8")
 PY
-  chmod +x "${wrapper_path}"
 }
 
 run_external_benchmark() {
