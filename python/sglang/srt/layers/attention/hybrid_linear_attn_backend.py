@@ -1567,11 +1567,16 @@ class HybridLinearAttnBackend(AttentionBackend):
         full_attn_backend: AttentionBackend,
         linear_attn_backend: MambaAttnBackendBase,
         full_attn_layers: list[int],
+        full_attn_decode_backend: Optional[AttentionBackend] = None,
     ):
         self.full_attn_layers = full_attn_layers
         self.full_attn_backend = full_attn_backend
         self.linear_attn_backend = linear_attn_backend
         self.attn_backend_list = [full_attn_backend, linear_attn_backend]
+        self.full_attn_decode_backend = None
+        if full_attn_decode_backend is not None:
+            self.full_attn_decode_backend = full_attn_decode_backend
+            self.attn_backend_list += [full_attn_decode_backend]
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         for attn_backend in self.attn_backend_list:
@@ -1643,9 +1648,14 @@ class HybridLinearAttnBackend(AttentionBackend):
     ):
         layer_id = layer.layer_id if layer else kwargs["layer_id"]
         if layer_id in self.full_attn_layers:
-            return self.full_attn_backend.forward_decode(
-                q, k, v, layer, forward_batch, save_kv_cache, **kwargs
-            )
+            if self.full_attn_decode_backend is not None:
+                return self.full_attn_decode_backend.forward_decode(
+                    q, k, v, layer, forward_batch, save_kv_cache, **kwargs
+                )
+            else:
+                return self.full_attn_backend.forward_decode(
+                    q, k, v, layer, forward_batch, save_kv_cache, **kwargs
+                )
         # Linear attention backend
         return self.linear_attn_backend.forward_decode(
             q=q,
