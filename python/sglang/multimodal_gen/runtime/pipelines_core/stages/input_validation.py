@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Change: Qwen Image Edit (I2I) auto output size — if aspect ratio is extreme (very
-#         narrow portrait or very wide), fall back to 768x1024 before VAE alignment.
-#         Explicit API size (width+height set) is unchanged.
+# Change: Qwen Image Edit (I2I) auto output size — ultra-wide: rescale with
+#         calculate_dimensions(FALLBACK_W*FALLBACK_H, w/h); ultra-tall: optional
+#         fixed FALLBACK_W x FALLBACK_H (see ULTRA_FALLBACK). Explicit API
+#         size unchanged.
 #
 # Env (optional):
 #   SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE=1  — disable this behavior
 #   SGLANG_QWEN_I2I_AUTO_ASPECT_MIN   (default 0.52)  width/height lower bound
 #   SGLANG_QWEN_I2I_AUTO_ASPECT_MAX   (default 3.0)   width/height upper bound
-#   SGLANG_QWEN_I2I_FALLBACK_WIDTH    (default 768)
+#   SGLANG_QWEN_I2I_ULTRA_FALLBACK  (default 1; registered in sglang/srt/environ.py)
+#         0/1 only: 1 = fixed canvas for ultra-tall; 0 = keep calculated width/height
+#   SGLANG_QWEN_I2I_FALLBACK_WIDTH    (default 768)  ultra-tall canvas when enabled;
+#         wide target area = W*H
 #   SGLANG_QWEN_I2I_FALLBACK_HEIGHT   (default 1024)
 
 """
@@ -36,12 +40,27 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.utils import best_output_size
+from sglang.multimodal_gen.utils import best_output_size, calculate_dimensions
+from sglang.srt.environ import envs
 
 logger = init_logger(__name__)
 
 # Alias for convenience
 V = StageValidators
+
+
+def _ultra_fallback_enabled() -> bool:
+    """Reads envs.SGLANG_QWEN_I2I_ULTRA_FALLBACK (0/1, default 1). See srt/environ.py."""
+    v = envs.SGLANG_QWEN_I2I_ULTRA_FALLBACK.get()
+    if v == 0:
+        return False
+    if v == 1:
+        return True
+    logger.warning(
+        "Invalid SGLANG_QWEN_I2I_ULTRA_FALLBACK=%s (use 0 or 1); defaulting to 1",
+        v,
+    )
+    return True
 
 
 # TODO: since this might change sampling params after logging, should be do this beforehand?
@@ -68,13 +87,14 @@ class InputValidationStage(PipelineStage):
     ) -> tuple[int, int]:
         """
         When the user does not pass an explicit output size, Qwen Image Edit derives
-        width/height from the last condition image (~1MP, preserve aspect). Very
-        narrow or very wide ratios often degrade quality; fall back to a moderate
-        canvas (defaults match common 768x1024 edit requests).
+        width/height from the last condition image. If aspect ratio is extreme:
+        - Too wide (w/h > max): rescale with calculate_dimensions using pixel budget
+          FALLBACK_WIDTH * FALLBACK_HEIGHT while preserving aspect ratio.
+        - Too tall (w/h < min): optionally use fixed FALLBACK_WIDTH x FALLBACK_HEIGHT
+          (toggle with SGLANG_QWEN_I2I_ULTRA_FALLBACK, 0 or 1, default 1).
 
         Disable with SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE=1.
-        Tune via SGLANG_QWEN_I2I_AUTO_ASPECT_MIN, SGLANG_QWEN_I2I_AUTO_ASPECT_MAX,
-        SGLANG_QWEN_I2I_FALLBACK_WIDTH, SGLANG_QWEN_I2I_FALLBACK_HEIGHT.
+        Tune via SGLANG_QWEN_I2I_AUTO_ASPECT_MIN/MAX, ULTRA_FALLBACK, FALLBACK_W/H.
         """
         if os.environ.get(
             "SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE", ""
@@ -85,21 +105,45 @@ class InputValidationStage(PipelineStage):
         r_max = float(os.environ.get("SGLANG_QWEN_I2I_AUTO_ASPECT_MAX", "3.0"))
         fb_w = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_WIDTH", "768"))
         fb_h = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_HEIGHT", "1024"))
+        target_area = fb_w * fb_h
 
         r_out = width / height
-        if r_out < r_min or r_out > r_max:
+        if r_out > r_max:
+            new_w, new_h, _ = calculate_dimensions(target_area, r_out)
             logger.info(
-                "Qwen I2I auto output size: aspect ratio %.4f outside [%.4f, %.4f], "
-                "using fallback %dx%d (was %dx%d)",
+                "Qwen I2I auto output size: aspect ratio %.4f > %.4f (ultra-wide), "
+                "calculate_dimensions(area=%d, ratio=w/h) → %dx%d (was %dx%d)",
                 r_out,
-                r_min,
                 r_max,
-                fb_w,
-                fb_h,
+                target_area,
+                new_w,
+                new_h,
                 width,
                 height,
             )
-            return fb_w, fb_h
+            return new_w, new_h
+        if r_out < r_min:
+            if _ultra_fallback_enabled():
+                logger.info(
+                    "Qwen I2I auto output size: aspect ratio %.4f < %.4f (ultra-tall), "
+                    "using fixed fallback %dx%d (was %dx%d)",
+                    r_out,
+                    r_min,
+                    fb_w,
+                    fb_h,
+                    width,
+                    height,
+                )
+                return fb_w, fb_h
+            logger.info(
+                "Qwen I2I auto output size: aspect ratio %.4f < %.4f (ultra-tall), "
+                "SGLANG_QWEN_I2I_ULTRA_FALLBACK=0 — keeping calculated size %dx%d",
+                r_out,
+                r_min,
+                width,
+                height,
+            )
+            return width, height
 
         return width, height
 
@@ -165,9 +209,7 @@ class InputValidationStage(PipelineStage):
             # adjust output image size
             if calculated_size is not None:
                 calculated_width, calculated_height = calculated_size
-                user_set_both = (
-                    batch.width is not None and batch.height is not None
-                )
+                user_set_both = batch.width is not None and batch.height is not None
                 width = batch.width or calculated_width
                 height = batch.height or calculated_height
                 if (not user_set_both) and isinstance(

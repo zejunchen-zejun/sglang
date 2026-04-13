@@ -285,9 +285,13 @@ class Envs:
     SGLANG_USE_AITER = EnvBool(False)
     SGLANG_ROCM_FUSED_DECODE_MLA = EnvBool(False)
     SGLANG_ROCM_DISABLE_LINEARQUANT = EnvBool(False)
-    SGLANG_USE_AITER_FA_ROUND_MODE = EnvBool(False)
+    # BF16 round mode for aiter flash-attn: 0=rtne (match NVIDIA), 1=rtna, 2=rtz; <0 uses rtna default
+    SGLANG_USE_AITER_FA_ROUND_MODE = EnvInt(-1)
     SGLANG_ENABLE_FUSED_ROPE_RMS_2WAY = EnvBool(False)
     SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE = EnvBool(False)
+
+    # Qwen Image I2I (multimodal_gen): ultra-tall fixed-canvas fallback; 0=off 1=on
+    SGLANG_QWEN_I2I_ULTRA_FALLBACK = EnvInt(1)
 
     # NPU
     SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT = EnvBool(False)

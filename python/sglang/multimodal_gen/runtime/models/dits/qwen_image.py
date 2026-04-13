@@ -563,8 +563,14 @@ class QwenImageCrossAttention(nn.Module):
         )
         if use_fused_rope_rms:
             (img_cos, img_sin), (txt_cos, txt_sin) = image_rotary_emb
-            txt_cos_sin = torch.cat([txt_cos, txt_sin], dim=-1).contiguous()
-            img_cos_sin = torch.cat([img_cos, img_sin], dim=-1).contiguous()
+            # freqs_cis may be float32 while aiter fused kernel expects activations dtype
+            target_dtype = img_query.dtype
+            txt_cos_sin = torch.cat(
+                [txt_cos.to(target_dtype), txt_sin.to(target_dtype)], dim=-1
+            ).contiguous()
+            img_cos_sin = torch.cat(
+                [img_cos.to(target_dtype), img_sin.to(target_dtype)], dim=-1
+            ).contiguous()
             batch_size = img_query.shape[0]
             seq_len_img = img_query.shape[1]
             num_heads_q = img_query.shape[2]

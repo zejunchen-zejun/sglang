@@ -83,13 +83,12 @@ class AITerImpl(AttentionImpl):
         # aiter.flash_attn_func expects tensors in [B, H, S, D] layout,
         # which is what ring_attn provides.
 
-        # 0: rtne, 1: rtna, 2: rtz
-        if envs.SGLANG_USE_AITER_FA_ROUND_MODE.get() == True:
-            # use Aiter FA round mode
-            how_v3_bf16_cvt = 2
-        else:
-            # default value is 1
+        # 0: rtne (match NVIDIA H20), 1: rtna (aiter default), 2: rtz; negative = rtna
+        round_mode = envs.SGLANG_USE_AITER_FA_ROUND_MODE.get()
+        if round_mode < 0:
             how_v3_bf16_cvt = 1
+        else:
+            how_v3_bf16_cvt = round_mode
         output, _ = aiter.flash_attn_func(
             query,
             key,

@@ -168,13 +168,15 @@ class QwenImagePipelineConfig(ImagePipelineConfig):
         # img_cos_sin_cache = torch.cat([img_cos_half, img_sin_half], dim=-1)
         # txt_cos_sin_cache = torch.cat([txt_cos_half, txt_sin_half], dim=-1)
         # return img_cos_sin_cache, txt_cos_sin_cache
+        # Keep cos/sin in float32 to match NVIDIA FlashInfer path; bf16 loses mantissa bits
+        # and error compounds over transformer layers × denoising steps.
         img_cos, img_sin = (
-            img_freqs.real.to(dtype=dtype),
-            img_freqs.imag.to(dtype=dtype),
+            img_freqs.real.to(dtype=torch.float32),
+            img_freqs.imag.to(dtype=torch.float32),
         )
         txt_cos, txt_sin = (
-            txt_freqs.real.to(dtype=dtype),
-            txt_freqs.imag.to(dtype=dtype),
+            txt_freqs.real.to(dtype=torch.float32),
+            txt_freqs.imag.to(dtype=torch.float32),
         )
 
         return (img_cos, img_sin), (txt_cos, txt_sin)
@@ -527,8 +529,10 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
         img_shapes = batch.img_shapes
         txt_seq_lens = batch.txt_seq_lens
 
-        (img_cos, img_sin), (txt_cos, txt_sin) = QwenImageEditPlusPipelineConfig.get_freqs_cis(
-            img_shapes, txt_seq_lens, rotary_emb, device, dtype
+        (img_cos, img_sin), (txt_cos, txt_sin) = (
+            QwenImageEditPlusPipelineConfig.get_freqs_cis(
+                img_shapes, txt_seq_lens, rotary_emb, device, dtype
+            )
         )
 
         noisy_img_seq_len = (
