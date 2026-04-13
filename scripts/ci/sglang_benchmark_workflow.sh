@@ -209,9 +209,9 @@ PY
 patch_request_rate_wrapper_invocation() {
   local work_dir=${1}
   local wrapper_path="${work_dir}/run_benchmark_serving_wrapper.py"
-  local run_script="${work_dir}/run.sh"
+  local shell_wrapper_path="${work_dir}/run_benchmark_serving_wrapper.sh"
 
-  if [[ ! -f "${wrapper_path}" || ! -f "${run_script}" ]]; then
+  if [[ ! -f "${wrapper_path}" ]]; then
     return 0
   fi
 
@@ -219,32 +219,28 @@ patch_request_rate_wrapper_invocation() {
     return 0
   fi
 
-  echo "Detected non-Python request rate wrapper, patching run.sh to execute it with bash."
-  chmod +x "${wrapper_path}"
-  python3 - "${run_script}" <<'PY'
+  echo "Detected non-Python request rate wrapper, replacing it with a Python shim."
+  mv "${wrapper_path}" "${shell_wrapper_path}"
+  chmod +x "${shell_wrapper_path}"
+  python3 - "${wrapper_path}" "$(basename "${shell_wrapper_path}")" <<'PY'
 import pathlib
-import re
 import sys
 
-run_script = pathlib.Path(sys.argv[1])
-text = run_script.read_text(encoding="utf-8")
-updated = re.sub(
-    r'python3?\s+\.?/run_benchmark_serving_wrapper\.py',
-    'bash ./run_benchmark_serving_wrapper.py',
-    text,
+wrapper_path = pathlib.Path(sys.argv[1])
+shell_wrapper_name = sys.argv[2]
+wrapper_path.write_text(
+    "#!/usr/bin/env python3\n"
+    "import pathlib\n"
+    "import subprocess\n"
+    "import sys\n"
+    "\n"
+    "script_dir = pathlib.Path(__file__).resolve().parent\n"
+    f"shell_wrapper = script_dir / {shell_wrapper_name!r}\n"
+    "raise SystemExit(subprocess.call([\"bash\", str(shell_wrapper), *sys.argv[1:]]))\n",
+    encoding="utf-8",
 )
-updated = re.sub(
-    r'python3?\s+run_benchmark_serving_wrapper\.py',
-    'bash ./run_benchmark_serving_wrapper.py',
-    updated,
-)
-
-if updated != text:
-    run_script.write_text(updated, encoding="utf-8")
-    print(f"Patched request rate launcher: {run_script}")
-else:
-    print(f"WARNING: Did not find request rate wrapper invocation in {run_script}")
 PY
+  chmod +x "${wrapper_path}"
 }
 
 run_external_benchmark() {
