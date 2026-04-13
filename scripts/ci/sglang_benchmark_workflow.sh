@@ -23,7 +23,11 @@ export SGLANG_VLM_CACHE_SIZE_MB="${SGLANG_VLM_CACHE_SIZE_MB:-8192}"
 export SGLANG_USE_AITER=1
 export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
 export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=1
-export SGLANG_USE_AITER_NEW_CA=true
+export SGLANG_USE_AITER_NEW_CA=false
+
+if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+  export AITER_MOE_PADDING_SIZE="${AITER_MOE_PADDING_SIZE:-256}"
+fi
 
 echo "Detect TYPE: ${TYPE}"
 echo "Detect model_name: ${MODEL_NAME}"
@@ -304,6 +308,7 @@ if [[ "${TYPE}" == "launch" ]]; then
     --mem-fraction-static 0.9 \
     --max-prefill-tokens 32768 \
     --max-running-requests 128 \
+    --disable-custom-all-reduce \
     --disable-radix-cache \
     --mm-attention-backend aiter_attn \
     > "${SERVER_LOG}" 2>&1 &
