@@ -11,7 +11,7 @@ on:
       run_mode:
         description: "Which workload to run"
         required: true
-        default: "accuracy"
+        default: "benchmark"
         type: choice
         options:
           - accuracy

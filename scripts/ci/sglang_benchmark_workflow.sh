@@ -113,170 +113,52 @@ EOF
   return 1
 }
 
-# Patch the copied benchmark files so they target the active model and port.
-rewrite_external_benchmark_files() {
-  local benchmark_root=${1}
-  python3 - "${benchmark_root}" "${MODEL_PATH}" "${PORT}" <<'PY'
-import pathlib
-import py_compile
-import re
-import sys
+# Prepare compatibility aliases instead of rewriting external benchmark sources.
+prepare_external_benchmark_environment() {
+  local alias_name
+  local alias_path
+  local alias_root
+  local model_basename
 
-benchmark_root = pathlib.Path(sys.argv[1])
-model_path = sys.argv[2]
-port = sys.argv[3]
+  model_basename=$(basename "${MODEL_PATH}")
 
-
-def preserve_quote_replacement(match, new_value):
-    prefix = match.group(1)
-    original_value = match.group(0)[len(prefix):]
-    if original_value.startswith('"') and original_value.endswith('"'):
-        return f'{prefix}"{new_value}"'
-    if original_value.startswith("'") and original_value.endswith("'"):
-        return f"{prefix}'{new_value}'"
-    return f"{prefix}{new_value}"
-
-model_patterns = [
-    (
-        re.compile(
-            r'(^\s*(?:MODEL_PATH|MODEL|model_path|model)\s*=\s*)(?:"[^"]*"|\'[^\']*\'|[^\s#]+)',
-            re.MULTILINE,
-        ),
-        lambda m: preserve_quote_replacement(m, model_path),
-    ),
-    (
-        re.compile(r'(--model-path(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\\"\')]+)'),
-        lambda m: f'{m.group(1)}{model_path}',
-    ),
-    (
-        re.compile(r'(--model(?!-path)(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\\"\')]+)'),
-        lambda m: f'{m.group(1)}{model_path}',
-    ),
-    (
-        re.compile(
-            r'/(?:data/|mnt/raid0/)?models/(?!benchamark_example\b|benchmark_example\b)[^\s"\'\\]+'
-        ),
-        lambda _: model_path,
-    ),
-]
-
-port_patterns = [
-    (
-        re.compile(
-            r'(^\s*(?:PORT|port)\s*=\s*)(?:"[^"]*"|\'[^\']*\'|[^\s#]+)',
-            re.MULTILINE,
-        ),
-        lambda m: preserve_quote_replacement(m, port),
-    ),
-    (
-        re.compile(r'(--port(?:=|\s+))(?:\"[^\"]*\"|\'[^\']*\'|[^\s\\\"\')]+)'),
-        lambda m: f'{m.group(1)}{port}',
-    ),
-    (
-        re.compile(r'(https?://localhost:)\d+'),
-        lambda m: f'{m.group(1)}{port}',
-    ),
-    (
-        re.compile(r'(https?://127\.0\.0\.1:)\d+'),
-        lambda m: f'{m.group(1)}{port}',
-    ),
-]
-
-updated_files = []
-for path in sorted(benchmark_root.rglob("*")):
-    if not path.is_file():
+  for alias_name in "${MODEL_NAME}" "${model_basename}"; do
+    [[ -n "${alias_name}" ]] || continue
+    for alias_root in "/data/models" "/mnt/raid0" "/mnt/raid0/models"; do
+      mkdir -p "${alias_root}"
+      alias_path="${alias_root}/${alias_name}"
+      if [[ -e "${alias_path}" && ! -L "${alias_path}" ]]; then
+        echo "Keeping existing benchmark alias path: ${alias_path}"
         continue
-
-    try:
-        text = path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        continue
-
-    updated = text
-    model_updates = 0
-    for pattern, repl in model_patterns:
-        updated, count = pattern.subn(repl, updated)
-        model_updates += count
-
-    port_updates = 0
-    for pattern, repl in port_patterns:
-        updated, count = pattern.subn(repl, updated)
-        port_updates += count
-
-    if updated != text:
-        path.write_text(updated, encoding="utf-8")
-        updated_files.append((path.relative_to(benchmark_root), model_updates, port_updates))
-
-    if path.suffix == ".py":
-        try:
-            py_compile.compile(str(path), doraise=True)
-        except py_compile.PyCompileError:
-            repaired = path.read_text(encoding="utf-8")
-            repaired = re.sub(
-                r'(--model-path(?:=|\s+))"([^"\n]+)"',
-                r"\1\2",
-                repaired,
-            )
-            repaired = re.sub(
-                r'(--model(?!-path)(?:=|\s+))"([^"\n]+)"',
-                r"\1\2",
-                repaired,
-            )
-            repaired = re.sub(
-                r'(--port(?:=|\s+))"([^"\n]+)"',
-                r"\1\2",
-                repaired,
-            )
-            if repaired != path.read_text(encoding="utf-8"):
-                path.write_text(repaired, encoding="utf-8")
-                updated_files.append((path.relative_to(benchmark_root), 0, 0))
-
-if not updated_files:
-    print(f"WARNING: No benchmark files required rewriting under {benchmark_root}")
-else:
-    for rel_path, model_updates, port_updates in updated_files:
-        print(f"Prepared benchmark file: {benchmark_root / rel_path}")
-        print(f"Applied model replacements: {model_updates}")
-        print(f"Applied port replacements: {port_updates}")
-PY
+      fi
+      ln -sfn "${MODEL_PATH}" "${alias_path}"
+    done
+  done
 }
 
-patch_request_rate_wrapper_invocation() {
-  local work_dir=${1}
-  local wrapper_path="${work_dir}/run_benchmark_serving_wrapper.py"
-
-  if [[ ! -f "${wrapper_path}" ]]; then
-    return 0
-  fi
-
-  if python3 -m py_compile "${wrapper_path}" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  echo "Request rate wrapper still fails Python compile, sanitizing rewritten CLI quoting."
-  python3 - "${wrapper_path}" <<'PY'
+verify_external_benchmark_log() {
+  local log_path=${1}
+  python3 - "${log_path}" <<'PY'
 import pathlib
 import re
 import sys
 
-wrapper_path = pathlib.Path(sys.argv[1])
-text = wrapper_path.read_text(encoding="utf-8")
-updated = re.sub(
-    r'(--model-path(?:=|\s+))"([^"\n]+)"',
-    r"\1\2",
-    text,
-)
-updated = re.sub(
-    r'(--model(?!-path)(?:=|\s+))"([^"\n]+)"',
-    r"\1\2",
-    updated,
-)
-updated = re.sub(
-    r'(--port(?:=|\s+))"([^"\n]+)"',
-    r"\1\2",
-    updated,
-)
-wrapper_path.write_text(updated, encoding="utf-8")
+log_path = pathlib.Path(sys.argv[1])
+text = log_path.read_text(encoding="utf-8", errors="replace")
+
+failure_patterns = [
+    ("python traceback", r"Traceback \(most recent call last\):"),
+    ("python syntax error", r"SyntaxError:"),
+    ("wrapper failure", r"Benchmark iteration \d+ failed"),
+    ("nonzero return code", r"Return code:\s*[1-9]\d*"),
+    ("all requests failed", r"Error Requests:\s*100(?:\.0+)?%"),
+    ("broken request threshold", r"too many broken_error=\d+"),
+]
+
+for label, pattern in failure_patterns:
+    if re.search(pattern, text):
+        print(f"Detected benchmark failure marker ({label}) in {log_path}")
+        raise SystemExit(1)
 PY
 }
 
@@ -299,20 +181,23 @@ run_external_benchmark() {
   work_dir=$(mktemp -d "/tmp/sglang_external_${benchmark_type}.XXXXXX")
   cp -a "${source_dir}/." "${work_dir}/"
   chmod -R u+w "${work_dir}"
-  rewrite_external_benchmark_files "${work_dir}"
-  if [[ "${benchmark_type}" == "request_rate" ]]; then
-    patch_request_rate_wrapper_invocation "${work_dir}"
-  fi
+  prepare_external_benchmark_environment
 
   (
     cd "${work_dir}"
     export MODEL="${MODEL_PATH}"
     export MODEL_PATH="${MODEL_PATH}"
+    export TOKENIZER="${MODEL_PATH}"
+    export TOKENIZER_PATH="${MODEL_PATH}"
+    export HOST="127.0.0.1"
     export PORT="${PORT}"
+    export BASE_URL="http://127.0.0.1:${PORT}"
     export SGLANG_BENCHMARK_MODEL_PATH="${MODEL_PATH}"
     export SGLANG_BENCHMARK_PORT="${PORT}"
     bash -euo pipefail "./run.sh"
   ) | tee "${log_path}"
+
+  verify_external_benchmark_log "${log_path}"
 }
 
 if [[ "${TYPE}" == "launch" ]]; then
