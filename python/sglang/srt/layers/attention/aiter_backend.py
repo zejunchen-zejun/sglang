@@ -123,7 +123,18 @@ class AiterAttnBackend(AttentionBackend):
             model_runner.model_config.num_attention_heads // get_attention_tp_size()
         )
         self.head_dim = model_runner.model_config.head_dim
-        self.v_head_dim = model_runner.token_to_kv_pool.get_value_buffer(0).shape[-1]
+        # Hybrid models (e.g. Qwen3-Next): KV pool only exists for full-attention layers,
+        # not layer 0. Match intel_amx_backend: pick any mapped full-attention layer id.
+        _vbuf_layer_id = 0
+        if hasattr(
+            model_runner.token_to_kv_pool, "full_attention_layer_id_mapping"
+        ):
+            _vbuf_layer_id = next(
+                iter(model_runner.token_to_kv_pool.full_attention_layer_id_mapping)
+            )
+        self.v_head_dim = model_runner.token_to_kv_pool.get_value_buffer(
+            _vbuf_layer_id
+        ).shape[-1]
         self.num_kv_head = model_runner.model_config.get_num_kv_heads(
             get_attention_tp_size()
         )
