@@ -26,9 +26,9 @@ on:
           - concurrency
           - request_rate
       model_list:
-        description: 'Model list to run on MI308 (JSON array format, default: ["offical_qwen3p5_397B_ptpc"])'
+        description: 'Model list to run on MI308 (JSON array format, default: ["offical_qwen3p5_397B_ptpc","Qwen3.5-27B-PTPC-compressor"])'
         required: false
-        default: '["offical_qwen3p5_397B_ptpc"]'
+        default: '["offical_qwen3p5_397B_ptpc","Qwen3.5-27B-PTPC-compressor"]'
       image:
         description: 'Image to use for the benchmark'
         required: true
@@ -40,8 +40,6 @@ concurrency:
 
 env:
   IMAGE: ${{ github.event.inputs.image || 'rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_4d921e5_aiter_6fe675a_qwen3_5_20260327_v2' }}
-  MODEL_NAME: offical_qwen3p5_397B_ptpc
-  MODEL_PATH: /models/offical_qwen3p5_397B_ptpc
   BENCHMARK_TARGET: ${{ github.event.inputs.benchmark_target || 'all' }}
   SGLANG_BENCHMARK_PORT: "8080"
   SGLANG_BENCHMARK_EXAMPLE_ROOT: /models/benchamark_example
@@ -56,11 +54,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        model: ${{ fromJson(github.event.inputs.model_list || '["offical_qwen3p5_397B_ptpc"]') }}
+        model: ${{ fromJson(github.event.inputs.model_list || '["offical_qwen3p5_397B_ptpc","Qwen3.5-27B-PTPC-compressor"]') }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Resolve model config
+        run: |
+          set -euo pipefail
+
+          model_name='${{ matrix.model }}'
+          case "${model_name}" in
+            offical_qwen3p5_397B_ptpc)
+              model_path="/models/offical_qwen3p5_397B_ptpc"
+              ;;
+            Qwen3.5-27B-PTPC-compressor)
+              model_path="/models/Qwen3.5-27B-PTPC-compressor"
+              ;;
+            *)
+              echo "Unknown model_name: ${model_name}"
+              exit 1
+              ;;
+          esac
+
+          echo "MODEL_NAME=${model_name}" >> "${GITHUB_ENV}"
+          echo "MODEL_PATH=${model_path}" >> "${GITHUB_ENV}"
+          echo "Resolved model_name: ${model_name}"
+          echo "Resolved model_path: ${model_path}"
 
       - name: Prepare SGLang image
         run: |
@@ -105,19 +126,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ matrix.model }}" != "${{ env.MODEL_NAME }}" ]; then
-            echo "Unknown model_name: ${{ matrix.model }}"
+          if [ -z "${MODEL_NAME:-}" ] || [ -z "${MODEL_PATH:-}" ]; then
+            echo "Model config is not set correctly."
             exit 1
           fi
 
-          if [ ! -d "${{ env.MODEL_PATH }}" ]; then
-            echo "Expected model directory not found: ${{ env.MODEL_PATH }}"
+          if [ ! -d "${MODEL_PATH}" ]; then
+            echo "Expected model directory not found: ${MODEL_PATH}"
             ls -lah /models
             exit 1
           fi
 
           ls -lah /models
-          du -sh "${{ env.MODEL_PATH }}"
+          du -sh "${MODEL_PATH}"
 
       - name: Validate benchmark scripts
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark') }}
@@ -227,32 +248,20 @@ jobs:
         run: |
           docker exec sglang_test bash -lc "df -h /dev/shm"
           docker exec sglang_test bash -lc "ls -lah /models"
-          docker exec sglang_test bash -lc "du -sh ${{ env.MODEL_PATH }}"
+          docker exec sglang_test bash -lc "du -sh \"${MODEL_PATH}\""
 
       - name: Launch the server
         timeout-minutes: 60
         run: |
           set -ex
-          model_name=${{ matrix.model }}
-          if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-          else
-            echo "Unknown model_name: ${model_name}"
-            exit 1
-          fi
+          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
 
       - name: Run GSM8K accuracy evaluation
         if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy') }}
         timeout-minutes: 45
         run: |
           set -ex
-          model_name=${{ matrix.model }}
-          if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} ${{ env.MODEL_PATH }} 8 1"
-          else
-            echo "Unknown model_name: ${model_name}"
-            exit 1
-          fi
+          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1"
 
       - name: Collect GSM8K accuracy summary
         if: ${{ success() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy')) }}
@@ -293,25 +302,19 @@ jobs:
         timeout-minutes: 300
         run: |
           set -ex
-          model_name=${{ matrix.model }}
-          if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            case "${{ env.BENCHMARK_TARGET }}" in
-              all)
-                docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh concurrency ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-                docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh request_rate ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-                ;;
-              concurrency|request_rate)
-                docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh ${{ env.BENCHMARK_TARGET }} ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-                ;;
-              *)
-                echo "Unknown benchmark_target: ${{ env.BENCHMARK_TARGET }}"
-                exit 1
-                ;;
-            esac
-          else
-            echo "Unknown model_name: ${model_name}"
-            exit 1
-          fi
+          case "${BENCHMARK_TARGET}" in
+            all)
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh concurrency \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh request_rate \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
+              ;;
+            concurrency|request_rate)
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh ${BENCHMARK_TARGET} \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
+              ;;
+            *)
+              echo "Unknown benchmark_target: ${BENCHMARK_TARGET}"
+              exit 1
+              ;;
+          esac
 
       - name: Collect benchmark summary
         if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark')) }}
