@@ -68,6 +68,50 @@ wait_for_server() {
   return 1
 }
 
+print_launch_recipe() {
+  local model=${1}
+  local attention_backend=${2}
+
+  echo
+  echo "========== LAUNCH ENVIRONMENT =========="
+  echo "export SGLANG_DISABLE_CUDNN_CHECK=${SGLANG_DISABLE_CUDNN_CHECK}"
+  echo "export SGLANG_USE_CUDA_IPC_TRANSPORT=${SGLANG_USE_CUDA_IPC_TRANSPORT}"
+  echo "export SGLANG_VLM_CACHE_SIZE_MB=${SGLANG_VLM_CACHE_SIZE_MB}"
+  echo "export SGLANG_USE_AITER=${SGLANG_USE_AITER}"
+  echo "export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=${SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE}"
+  echo "export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=${SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB}"
+  echo "export SGLANG_USE_AITER_NEW_CA=${SGLANG_USE_AITER_NEW_CA}"
+  if [[ -n "${AITER_MOE_PADDING_SIZE:-}" ]]; then
+    echo "export AITER_MOE_PADDING_SIZE=${AITER_MOE_PADDING_SIZE}"
+  fi
+
+  echo
+  echo "setup server for TP${TP}:"
+  cat <<EOF
+nohup python3 -m sglang.launch_server \\
+  --port ${PORT} \\
+  --model-path ${model} \\
+  --tp-size ${TP} \\
+  --attention-backend ${attention_backend} \\
+  --reasoning-parser qwen3 \\
+  --tool-call-parser qwen3_coder \\
+  --enable-multimodal \\
+  --trust-remote-code \\
+  --chunked-prefill-size 32768 \\
+  --mem-fraction-static 0.9 \\
+  --max-prefill-tokens 32768 \\
+  --max-running-requests 128 \\
+EOF
+  if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+    echo "  --disable-custom-all-reduce \\"
+  fi
+  cat <<EOF
+  --disable-radix-cache \\
+  --mm-attention-backend aiter_attn \\
+  > ${SERVER_LOG} 2>&1 &
+EOF
+}
+
 smoke_test_server() {
   local max_retries=3
   local retry_interval=10
@@ -237,6 +281,8 @@ if [[ "${TYPE}" == "launch" ]]; then
   if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
     launch_args+=(--disable-custom-all-reduce)
   fi
+
+  print_launch_recipe "${model}" "${attention_backend}"
 
   nohup python3 -m sglang.launch_server "${launch_args[@]}" > "${SERVER_LOG}" 2>&1 &
 
