@@ -68,9 +68,13 @@ jobs:
           case "${model_name}" in
             offical_qwen3p5_397B_ptpc)
               model_path="/models/offical_qwen3p5_397B_ptpc"
+              model_tp="8"
+              model_vlm_cache_size_mb="0"
               ;;
             Qwen3.5-27B-PTPC-compressor)
               model_path="/models/Qwen3.5-27B-PTPC-compressor"
+              model_tp="1"
+              model_vlm_cache_size_mb="8192"
               ;;
             *)
               echo "Unknown model_name: ${model_name}"
@@ -80,8 +84,12 @@ jobs:
 
           echo "MODEL_NAME=${model_name}" >> "${GITHUB_ENV}"
           echo "MODEL_PATH=${model_path}" >> "${GITHUB_ENV}"
+          echo "MODEL_TP=${model_tp}" >> "${GITHUB_ENV}"
+          echo "MODEL_VLM_CACHE_SIZE_MB=${model_vlm_cache_size_mb}" >> "${GITHUB_ENV}"
           echo "Resolved model_name: ${model_name}"
           echo "Resolved model_path: ${model_path}"
+          echo "Resolved model_tp: ${model_tp}"
+          echo "Resolved model_vlm_cache_size_mb: ${model_vlm_cache_size_mb}"
 
       - name: Prepare SGLang image
         run: |
@@ -126,7 +134,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "${MODEL_NAME:-}" ] || [ -z "${MODEL_PATH:-}" ]; then
+          if [ -z "${MODEL_NAME:-}" ] || [ -z "${MODEL_PATH:-}" ] || [ -z "${MODEL_TP:-}" ] || [ -z "${MODEL_VLM_CACHE_SIZE_MB:-}" ]; then
             echo "Model config is not set correctly."
             exit 1
           fi
@@ -227,7 +235,7 @@ jobs:
             --network=host \
             --privileged \
             --cap-add=SYS_PTRACE \
-            -e SGLANG_VLM_CACHE_SIZE_MB=0 \
+            -e SGLANG_VLM_CACHE_SIZE_MB=${MODEL_VLM_CACHE_SIZE_MB} \
             -e SGLANG_BENCHMARK_PORT=${{ env.SGLANG_BENCHMARK_PORT }} \
             -e SGLANG_BENCHMARK_EXAMPLE_ROOT=${{ env.SGLANG_BENCHMARK_EXAMPLE_ROOT }} \
             -e SGLANG_BENCHMARK_RESULTS_DIR=${{ env.SGLANG_BENCHMARK_RESULTS_DIR }} \
@@ -254,14 +262,14 @@ jobs:
         timeout-minutes: 60
         run: |
           set -ex
-          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
+          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
 
       - name: Run GSM8K accuracy evaluation
         if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy') }}
         timeout-minutes: 45
         run: |
           set -ex
-          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1"
+          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1"
 
       - name: Collect GSM8K accuracy summary
         if: ${{ success() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy')) }}
@@ -304,11 +312,11 @@ jobs:
           set -ex
           case "${BENCHMARK_TARGET}" in
             all)
-              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh concurrency \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
-              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh request_rate \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh concurrency \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh request_rate \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
               ;;
             concurrency|request_rate)
-              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh ${BENCHMARK_TARGET} \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh ${BENCHMARK_TARGET} \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
               ;;
             *)
               echo "Unknown benchmark_target: ${BENCHMARK_TARGET}"

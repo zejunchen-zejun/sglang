@@ -212,24 +212,28 @@ if [[ "${TYPE}" == "launch" ]]; then
   pkill -f "python3 -m sglang.launch_server" || true
   rm -f "${SERVER_LOG}"
   model="${MODEL_PATH}"
+  launch_args=(
+    --port "${PORT}"
+    --model-path "${model}"
+    --tp-size "${TP}"
+    --attention-backend triton
+    --reasoning-parser qwen3
+    --tool-call-parser qwen3_coder
+    --enable-multimodal
+    --trust-remote-code
+    --chunked-prefill-size 32768
+    --mem-fraction-static 0.9
+    --max-prefill-tokens 32768
+    --max-running-requests 128
+    --disable-radix-cache
+    --mm-attention-backend aiter_attn
+  )
 
-  nohup python3 -m sglang.launch_server \
-    --port "${PORT}" \
-    --model-path "${model}" \
-    --tp-size "${TP}" \
-    --attention-backend triton \
-    --reasoning-parser qwen3 \
-    --tool-call-parser qwen3_coder \
-    --enable-multimodal \
-    --trust-remote-code \
-    --chunked-prefill-size 32768 \
-    --mem-fraction-static 0.9 \
-    --max-prefill-tokens 32768 \
-    --max-running-requests 128 \
-    --disable-custom-all-reduce \
-    --disable-radix-cache \
-    --mm-attention-backend aiter_attn \
-    > "${SERVER_LOG}" 2>&1 &
+  if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+    launch_args+=(--disable-custom-all-reduce)
+  fi
+
+  nohup python3 -m sglang.launch_server "${launch_args[@]}" > "${SERVER_LOG}" 2>&1 &
 
   if ! wait_for_server "${TIMEOUT}"; then
     pkill -f "python3 -m sglang.launch_server" || true
