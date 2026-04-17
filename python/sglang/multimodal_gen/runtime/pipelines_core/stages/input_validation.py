@@ -1,18 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Change: Qwen Image Edit (I2I) auto output size — ultra-wide: rescale with
-#         calculate_dimensions(FALLBACK_W*FALLBACK_H, w/h); ultra-tall: optional
-#         fixed FALLBACK_W x FALLBACK_H (see ULTRA_FALLBACK). Explicit API
-#         size unchanged.
+# Change: Qwen Image Edit (I2I) auto output size — ultra-wide: keep size from
+#         prepare_calculated_size (VAE_IMAGE_SIZE budget);
+#         ultra-tall: fixed FALLBACK_W x FALLBACK_H for multi-image input and
+#         keep calculated size for single-image input. Explicit API size unchanged.
 #
 # Env (optional):
 #   SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE=1  — disable this behavior
 #   SGLANG_QWEN_I2I_AUTO_ASPECT_MIN   (default 0.52)  width/height lower bound
 #   SGLANG_QWEN_I2I_AUTO_ASPECT_MAX   (default 3.0)   width/height upper bound
-#   SGLANG_QWEN_I2I_ULTRA_FALLBACK  (default 1; registered in sglang/srt/environ.py)
-#         0/1 only: 1 = fixed canvas for ultra-tall; 0 = keep calculated width/height
-#   SGLANG_QWEN_I2I_FALLBACK_WIDTH    (default 768)  ultra-tall canvas when enabled;
-#         wide target area = W*H
+#   SGLANG_QWEN_I2I_FALLBACK_WIDTH    (default 768)   ultra-tall multi-image fallback
 #   SGLANG_QWEN_I2I_FALLBACK_HEIGHT   (default 1024)
 
 """
@@ -40,27 +37,12 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.utils import best_output_size, calculate_dimensions
-from sglang.srt.environ import envs
+from sglang.multimodal_gen.utils import best_output_size
 
 logger = init_logger(__name__)
 
 # Alias for convenience
 V = StageValidators
-
-
-def _ultra_fallback_enabled() -> bool:
-    """Reads envs.SGLANG_QWEN_I2I_ULTRA_FALLBACK (0/1, default 1). See srt/environ.py."""
-    v = envs.SGLANG_QWEN_I2I_ULTRA_FALLBACK.get()
-    if v == 0:
-        return False
-    if v == 1:
-        return True
-    logger.warning(
-        "Invalid SGLANG_QWEN_I2I_ULTRA_FALLBACK=%s (use 0 or 1); defaulting to 1",
-        v,
-    )
-    return True
 
 
 # TODO: since this might change sampling params after logging, should be do this beforehand?
@@ -84,17 +66,17 @@ class InputValidationStage(PipelineStage):
     def _stabilize_qwen_edit_auto_output_size(
         width: int,
         height: int,
+        num_condition_images: int,
     ) -> tuple[int, int]:
         """
         When the user does not pass an explicit output size, Qwen Image Edit derives
         width/height from the last condition image. If aspect ratio is extreme:
-        - Too wide (w/h > max): rescale with calculate_dimensions using pixel budget
-          FALLBACK_WIDTH * FALLBACK_HEIGHT while preserving aspect ratio.
-        - Too tall (w/h < min): optionally use fixed FALLBACK_WIDTH x FALLBACK_HEIGHT
-          (toggle with SGLANG_QWEN_I2I_ULTRA_FALLBACK, 0 or 1, default 1).
+        - Too wide (w/h > max): keep width/height (already from VAE_IMAGE_SIZE budget);
+        - Too tall (w/h < min): use fixed FALLBACK_WIDTH x FALLBACK_HEIGHT only for
+          multi-image input; keep calculated size for single-image input.
 
         Disable with SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE=1.
-        Tune via SGLANG_QWEN_I2I_AUTO_ASPECT_MIN/MAX, ULTRA_FALLBACK, FALLBACK_W/H.
+        Tune via SGLANG_QWEN_I2I_AUTO_ASPECT_MIN/MAX and FALLBACK_W/H.
         """
         if os.environ.get(
             "SGLANG_QWEN_I2I_DISABLE_AUTO_SIZE_STABILIZE", ""
@@ -103,30 +85,24 @@ class InputValidationStage(PipelineStage):
 
         r_min = float(os.environ.get("SGLANG_QWEN_I2I_AUTO_ASPECT_MIN", "0.52"))
         r_max = float(os.environ.get("SGLANG_QWEN_I2I_AUTO_ASPECT_MAX", "3.0"))
-        fb_w = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_WIDTH", "768"))
-        fb_h = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_HEIGHT", "1024"))
-        target_area = fb_w * fb_h
-
         r_out = width / height
+
         if r_out > r_max:
-            new_w, new_h, _ = calculate_dimensions(target_area, r_out)
             logger.info(
                 "Qwen I2I auto output size: aspect ratio %.4f > %.4f (ultra-wide), "
-                "calculate_dimensions(area=%d, ratio=w/h) → %dx%d (was %dx%d)",
+                "keeping %dx%d (no secondary rescale; matches VAE-calculated budget)",
                 r_out,
                 r_max,
-                target_area,
-                new_w,
-                new_h,
                 width,
                 height,
             )
-            return new_w, new_h
-        if r_out < r_min:
-            if _ultra_fallback_enabled():
+        elif r_out < r_min:
+            if num_condition_images >= 2:
+                fb_w = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_WIDTH", "768"))
+                fb_h = int(os.environ.get("SGLANG_QWEN_I2I_FALLBACK_HEIGHT", "1024"))
                 logger.info(
                     "Qwen I2I auto output size: aspect ratio %.4f < %.4f (ultra-tall), "
-                    "using fixed fallback %dx%d (was %dx%d)",
+                    "multi-image input, using fixed fallback %dx%d (was %dx%d)",
                     r_out,
                     r_min,
                     fb_w,
@@ -135,15 +111,15 @@ class InputValidationStage(PipelineStage):
                     height,
                 )
                 return fb_w, fb_h
+
             logger.info(
                 "Qwen I2I auto output size: aspect ratio %.4f < %.4f (ultra-tall), "
-                "SGLANG_QWEN_I2I_ULTRA_FALLBACK=0 — keeping calculated size %dx%d",
+                "single-image input, keeping calculated size %dx%d",
                 r_out,
                 r_min,
                 width,
                 height,
             )
-            return width, height
 
         return width, height
 
@@ -187,6 +163,7 @@ class InputValidationStage(PipelineStage):
             # calculate new condition image size
             if not isinstance(batch.condition_image, list):
                 batch.condition_image = [batch.condition_image]
+            num_condition_images = len(batch.condition_image)
 
             processed_images = []
             final_image = batch.condition_image[-1]
@@ -216,7 +193,7 @@ class InputValidationStage(PipelineStage):
                     config, QwenImageEditPipelineConfig
                 ):
                     width, height = self._stabilize_qwen_edit_auto_output_size(
-                        width, height
+                        width, height, num_condition_images
                     )
                 multiple_of = (
                     server_args.pipeline_config.vae_config.get_vae_scale_factor() * 2
