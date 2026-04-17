@@ -212,11 +212,16 @@ if [[ "${TYPE}" == "launch" ]]; then
   pkill -f "python3 -m sglang.launch_server" || true
   rm -f "${SERVER_LOG}"
   model="${MODEL_PATH}"
+  attention_backend="aiter"
+  if [[ "${MODEL_NAME}" == "Qwen3.5-27B-PTPC-compressor" ]]; then
+    attention_backend="triton"
+  fi
+
   launch_args=(
     --port "${PORT}"
     --model-path "${model}"
     --tp-size "${TP}"
-    --attention-backend triton
+    --attention-backend "${attention_backend}"
     --reasoning-parser qwen3
     --tool-call-parser qwen3_coder
     --enable-multimodal
