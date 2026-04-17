@@ -254,7 +254,7 @@ jobs:
         timeout-minutes: 60
         run: |
           set -ex
-          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
+          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch \"${MODEL_NAME}\" \"${MODEL_PATH}\" 8 1 45"
 
       - name: Run GSM8K accuracy evaluation
         if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy') }}
