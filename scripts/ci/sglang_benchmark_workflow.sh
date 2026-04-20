@@ -12,7 +12,6 @@ PORT=${SGLANG_BENCHMARK_PORT:-8080}
 GSM8K_NUM_QUESTIONS=${SGLANG_BENCHMARK_GSM8K_NUM_QUESTIONS:-200}
 GSM8K_PARALLEL=${SGLANG_BENCHMARK_GSM8K_PARALLEL:-128}
 GSM8K_MAX_NEW_TOKENS=${SGLANG_BENCHMARK_GSM8K_MAX_NEW_TOKENS:-4096}
-GSM8K_ENABLE_THINKING=${SGLANG_BENCHMARK_GSM8K_ENABLE_THINKING:-1}
 ACCURACY_RESULTS_DIR=${SGLANG_BENCHMARK_ACCURACY_RESULTS_DIR:-accuracy_test_results}
 SERVER_LOG=${SGLANG_BENCHMARK_SERVER_LOG:-/tmp/sglang_qwen35_server.log}
 BENCHMARK_RESULTS_DIR=${SGLANG_BENCHMARK_RESULTS_DIR:-benchmark_test_results}
@@ -316,13 +315,6 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
   if [[ "${MODEL_NAME}" != "offical_qwen3p5_397B_ptpc" ]]; then
     benchmark_args+=(
       --max-new-tokens "${GSM8K_MAX_NEW_TOKENS}"
-    )
-  fi
-
-  if [[ "${MODEL_NAME}" != "offical_qwen3p5_397B_ptpc" && "${GSM8K_ENABLE_THINKING}" == "1" ]]; then
-    benchmark_args+=(
-      --enable-thinking
-      --tokenizer-path "${MODEL_PATH}"
     )
   fi
 
