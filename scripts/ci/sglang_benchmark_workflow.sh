@@ -38,8 +38,6 @@ echo "Detect TP: ${TP}"
 echo "Detect EP: ${EP}"
 echo "Detect TIMEOUT: ${TIMEOUT}"
 echo "Detect PORT: ${PORT}"
-echo "Detect gsm8k_max_new_tokens: ${GSM8K_MAX_NEW_TOKENS}"
-echo "Detect gsm8k_enable_thinking: ${GSM8K_ENABLE_THINKING}"
 echo "Detect benchmark_example_root: ${BENCHMARK_EXAMPLE_ROOT}"
 echo "Detect benchmark_results_dir: ${BENCHMARK_RESULTS_DIR}"
 
@@ -311,19 +309,24 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
     --backend srt
     --parallel "${GSM8K_PARALLEL}"
     --num-questions "${GSM8K_NUM_QUESTIONS}"
-    --max-new-tokens "${GSM8K_MAX_NEW_TOKENS}"
     --result-file "${result_jsonl}"
     --raw-result-file "${raw_result_file}"
   )
 
-  if [[ "${GSM8K_ENABLE_THINKING}" == "1" ]]; then
+  if [[ "${MODEL_NAME}" != "offical_qwen3p5_397B_ptpc" ]]; then
+    benchmark_args+=(
+      --max-new-tokens "${GSM8K_MAX_NEW_TOKENS}"
+    )
+  fi
+
+  if [[ "${MODEL_NAME}" != "offical_qwen3p5_397B_ptpc" && "${GSM8K_ENABLE_THINKING}" == "1" ]]; then
     benchmark_args+=(
       --enable-thinking
       --tokenizer-path "${MODEL_PATH}"
     )
   fi
 
-  echo "Running benchmark/gsm8k/bench_sglang.py with aligned thinking settings."
+  echo "Running benchmark/gsm8k/bench_sglang.py."
   python3 benchmark/gsm8k/bench_sglang.py "${benchmark_args[@]}" \
     | tee "gsm8k_accuracy_${MODEL_NAME}_TP${TP}_EP${EP}.log"
 
