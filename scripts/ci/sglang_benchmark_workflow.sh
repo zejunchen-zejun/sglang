@@ -169,7 +169,13 @@ prepare_external_benchmark_environment() {
 
   for alias_name in "${MODEL_NAME}" "${model_basename}"; do
     [[ -n "${alias_name}" ]] || continue
-    for alias_root in "/data/models" "/mnt/raid0" "/mnt/raid0/models"; do
+    for alias_root in \
+      "/data/models" \
+      "/data/models/Qwen/uc" \
+      "/mnt/raid0" \
+      "/mnt/raid0/models" \
+      "/mnt/raid0/Qwen/uc" \
+      "/mnt/raid0/models/Qwen/uc"; do
       mkdir -p "${alias_root}"
       alias_path="${alias_root}/${alias_name}"
       if [[ -e "${alias_path}" && ! -L "${alias_path}" ]]; then
