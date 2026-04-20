@@ -11,6 +11,8 @@ TIMEOUT=${6:-45}
 PORT=${SGLANG_BENCHMARK_PORT:-8080}
 GSM8K_NUM_QUESTIONS=${SGLANG_BENCHMARK_GSM8K_NUM_QUESTIONS:-200}
 GSM8K_PARALLEL=${SGLANG_BENCHMARK_GSM8K_PARALLEL:-128}
+GSM8K_MAX_NEW_TOKENS=${SGLANG_BENCHMARK_GSM8K_MAX_NEW_TOKENS:-4096}
+GSM8K_ENABLE_THINKING=${SGLANG_BENCHMARK_GSM8K_ENABLE_THINKING:-1}
 ACCURACY_RESULTS_DIR=${SGLANG_BENCHMARK_ACCURACY_RESULTS_DIR:-accuracy_test_results}
 SERVER_LOG=${SGLANG_BENCHMARK_SERVER_LOG:-/tmp/sglang_qwen35_server.log}
 BENCHMARK_RESULTS_DIR=${SGLANG_BENCHMARK_RESULTS_DIR:-benchmark_test_results}
@@ -36,6 +38,8 @@ echo "Detect TP: ${TP}"
 echo "Detect EP: ${EP}"
 echo "Detect TIMEOUT: ${TIMEOUT}"
 echo "Detect PORT: ${PORT}"
+echo "Detect gsm8k_max_new_tokens: ${GSM8K_MAX_NEW_TOKENS}"
+echo "Detect gsm8k_enable_thinking: ${GSM8K_ENABLE_THINKING}"
 echo "Detect benchmark_example_root: ${BENCHMARK_EXAMPLE_ROOT}"
 echo "Detect benchmark_results_dir: ${BENCHMARK_RESULTS_DIR}"
 
@@ -297,30 +301,50 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
   echo
   echo "========== STARTING GSM8K ACCURACY EVALUATION =========="
   mkdir -p "${ACCURACY_RESULTS_DIR}"
+  result_jsonl="${ACCURACY_RESULTS_DIR}/${MODEL_NAME}_gsm8k_result.jsonl"
+  raw_result_file="${ACCURACY_RESULTS_DIR}/${MODEL_NAME}_gsm8k_raw_results.jsonl"
+  rm -f "${result_jsonl}" "${raw_result_file}"
+
+  benchmark_args=(
+    --host "http://127.0.0.1"
+    --port "${PORT}"
+    --backend srt
+    --parallel "${GSM8K_PARALLEL}"
+    --num-questions "${GSM8K_NUM_QUESTIONS}"
+    --max-new-tokens "${GSM8K_MAX_NEW_TOKENS}"
+    --result-file "${result_jsonl}"
+    --raw-result-file "${raw_result_file}"
+  )
+
+  if [[ "${GSM8K_ENABLE_THINKING}" == "1" ]]; then
+    benchmark_args+=(
+      --enable-thinking
+      --tokenizer-path "${MODEL_PATH}"
+    )
+  fi
+
+  echo "Running benchmark/gsm8k/bench_sglang.py with aligned thinking settings."
+  python3 benchmark/gsm8k/bench_sglang.py "${benchmark_args[@]}" \
+    | tee "gsm8k_accuracy_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+
   MODEL_NAME="${MODEL_NAME}" \
-  PORT="${PORT}" \
-  GSM8K_NUM_QUESTIONS="${GSM8K_NUM_QUESTIONS}" \
-  GSM8K_PARALLEL="${GSM8K_PARALLEL}" \
+  RESULT_JSONL="${result_jsonl}" \
   ACCURACY_RESULTS_DIR="${ACCURACY_RESULTS_DIR}" \
-  python3 - <<'PY' | tee "gsm8k_accuracy_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+  python3 - <<'PY'
 import json
 import os
-from types import SimpleNamespace
+from pathlib import Path
 
-from sglang.test.few_shot_gsm8k import run_eval
+result_jsonl = Path(os.environ["RESULT_JSONL"])
+result_lines = [
+    line.strip()
+    for line in result_jsonl.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+if not result_lines:
+    raise SystemExit(f"No GSM8K benchmark results found in {result_jsonl}")
 
-metrics = run_eval(
-    SimpleNamespace(
-        num_shots=5,
-        data_path=None,
-        num_questions=int(os.environ["GSM8K_NUM_QUESTIONS"]),
-        max_new_tokens=512,
-        parallel=int(os.environ["GSM8K_PARALLEL"]),
-        host="http://127.0.0.1",
-        port=int(os.environ["PORT"]),
-        temperature=0.0,
-    )
-)
+metrics = json.loads(result_lines[-1])
 
 result_path = os.path.join(
     os.environ["ACCURACY_RESULTS_DIR"], f'{os.environ["MODEL_NAME"]}_gsm8k_results.json'
