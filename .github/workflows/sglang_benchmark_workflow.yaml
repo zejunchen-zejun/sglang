@@ -26,22 +26,19 @@ on:
           - concurrency
           - request_rate
       model_list:
-        description: 'Model list to run on MI308 (JSON array format, default: ["offical_qwen3p5_397B_ptpc"])'
+        description: 'Model list to run on MI308 (JSON array format, default: ["offical_qwen3p5_397B_ptpc","Qwen3.5-27B-PTPC-compressor"])'
         required: false
-        default: '["offical_qwen3p5_397B_ptpc"]'
+        default: '["offical_qwen3p5_397B_ptpc","Qwen3.5-27B-PTPC-compressor"]'
       image:
-        description: 'Image to use for the benchmark'
-        required: true
-        default: "rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_4d921e5_aiter_6fe675a_qwen3_5_20260327_v2"
+        description: 'Optional image override for the benchmark'
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  IMAGE: ${{ github.event.inputs.image || 'rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_4d921e5_aiter_6fe675a_qwen3_5_20260327_v2' }}
-  MODEL_NAME: offical_qwen3p5_397B_ptpc
-  MODEL_PATH: /models/offical_qwen3p5_397B_ptpc
   BENCHMARK_TARGET: ${{ github.event.inputs.benchmark_target || 'all' }}
   SGLANG_BENCHMARK_PORT: "8080"
   SGLANG_BENCHMARK_EXAMPLE_ROOT: /models/benchamark_example
@@ -56,23 +53,63 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        model: ${{ fromJson(github.event.inputs.model_list || '["offical_qwen3p5_397B_ptpc"]') }}
+        model: ${{ fromJson(github.event.inputs.model_list || '["offical_qwen3p5_397B_ptpc","Qwen3.5-27B-PTPC-compressor"]') }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Resolve model config
+        run: |
+          set -euo pipefail
+
+          model_name='${{ matrix.model }}'
+          workflow_image='${{ github.event.inputs.image || '' }}'
+          case "${model_name}" in
+            offical_qwen3p5_397B_ptpc)
+              model_path="/models/offical_qwen3p5_397B_ptpc"
+              model_image="rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_8e85368_aiter_303a583_qwen3_5_20260417_v2"
+              model_tp="8"
+              model_vlm_cache_size_mb="0"
+              ;;
+            Qwen3.5-27B-PTPC-compressor)
+              model_path="/models/Qwen3.5-27B-PTPC-compressor"
+              model_image="rocm/ali-private:ubuntu22.04_rocm7.2.0.43_cp310_torch2.9.1_sglang_8e85368_aiter_303a583_qwen3_5_20260417_v2"
+              model_tp="1"
+              model_vlm_cache_size_mb="8192"
+              ;;
+            *)
+              echo "Unknown model_name: ${model_name}"
+              exit 1
+              ;;
+          esac
+
+          if [ -n "${workflow_image}" ]; then
+            model_image="${workflow_image}"
+          fi
+
+          echo "MODEL_NAME=${model_name}" >> "${GITHUB_ENV}"
+          echo "MODEL_PATH=${model_path}" >> "${GITHUB_ENV}"
+          echo "MODEL_IMAGE=${model_image}" >> "${GITHUB_ENV}"
+          echo "MODEL_TP=${model_tp}" >> "${GITHUB_ENV}"
+          echo "MODEL_VLM_CACHE_SIZE_MB=${model_vlm_cache_size_mb}" >> "${GITHUB_ENV}"
+          echo "Resolved model_name: ${model_name}"
+          echo "Resolved model_path: ${model_path}"
+          echo "Resolved model_image: ${model_image}"
+          echo "Resolved model_tp: ${model_tp}"
+          echo "Resolved model_vlm_cache_size_mb: ${model_vlm_cache_size_mb}"
+
       - name: Prepare SGLang image
         run: |
           set -euo pipefail
 
-          if docker image inspect "${{ env.IMAGE }}" >/dev/null 2>&1; then
+          if docker image inspect "${MODEL_IMAGE}" >/dev/null 2>&1; then
             echo "Using local image:"
-            docker image ls "${{ env.IMAGE }}"
+            docker image ls "${MODEL_IMAGE}"
             exit 0
           fi
 
-          echo "Local image not found, trying to pull: ${{ env.IMAGE }}"
+          echo "Local image not found, trying to pull: ${MODEL_IMAGE}"
 
           if [ -n "${{ secrets.ALISHARED }}" ]; then
             echo "${{ secrets.ALISHARED }}" | docker login -u alishared --password-stdin || true
@@ -80,7 +117,7 @@ jobs:
 
           pulled=0
           for i in {1..3}; do
-            if docker pull "${{ env.IMAGE }}"; then
+            if docker pull "${MODEL_IMAGE}"; then
               pulled=1
               break
             fi
@@ -92,32 +129,32 @@ jobs:
           done
 
           if [ "${pulled}" -ne 1 ]; then
-            echo "Failed to find local image and docker pull failed: ${{ env.IMAGE }}"
+            echo "Failed to find local image and docker pull failed: ${MODEL_IMAGE}"
             echo "Available local images:"
             docker image ls --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}' | sort || true
             exit 1
           fi
 
           echo "Pulled image:"
-          docker image ls "${{ env.IMAGE }}"
+          docker image ls "${MODEL_IMAGE}"
 
       - name: Validate model path
         run: |
           set -euo pipefail
 
-          if [ "${{ matrix.model }}" != "${{ env.MODEL_NAME }}" ]; then
-            echo "Unknown model_name: ${{ matrix.model }}"
+          if [ -z "${MODEL_NAME:-}" ] || [ -z "${MODEL_PATH:-}" ] || [ -z "${MODEL_IMAGE:-}" ] || [ -z "${MODEL_TP:-}" ] || [ -z "${MODEL_VLM_CACHE_SIZE_MB:-}" ]; then
+            echo "Model config is not set correctly."
             exit 1
           fi
 
-          if [ ! -d "${{ env.MODEL_PATH }}" ]; then
-            echo "Expected model directory not found: ${{ env.MODEL_PATH }}"
+          if [ ! -d "${MODEL_PATH}" ]; then
+            echo "Expected model directory not found: ${MODEL_PATH}"
             ls -lah /models
             exit 1
           fi
 
           ls -lah /models
-          du -sh "${{ env.MODEL_PATH }}"
+          du -sh "${MODEL_PATH}"
 
       - name: Validate benchmark scripts
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark') }}
@@ -149,8 +186,8 @@ jobs:
 
       - name: Generate Dockerfile
         run: |
-          cat <<'EOF' > Dockerfile.mod
-          FROM ${{ env.IMAGE }}
+          cat <<EOF > Dockerfile.mod
+          FROM ${MODEL_IMAGE}
           ENV GPU_ARCHS="gfx942"
           ENV PYTORCH_ROCM_ARCH="gfx942"
 
@@ -163,9 +200,9 @@ jobs:
           RUN echo "=== sglang version before installation ===" && pip show sglang || true
           RUN pip uninstall -y sgl-kernel sglang || true
           RUN pip install "pybind11>=3.0.1" "transformers>=4.57.0" "oss2"
-          RUN git clone ${{ env.SGLANG_GITHUB_REPO_URL }} /sglang-checkout && \
+          RUN git clone ${SGLANG_GITHUB_REPO_URL} /sglang-checkout && \
               cd /sglang-checkout && \
-              git checkout ${{ env.SGLANG_GITHUB_COMMIT_SHA }} && \
+              git checkout ${SGLANG_GITHUB_COMMIT_SHA} && \
               git rev-parse HEAD && \
               pip install --upgrade pip && \
               cd sgl-kernel && \
@@ -206,7 +243,7 @@ jobs:
             --network=host \
             --privileged \
             --cap-add=SYS_PTRACE \
-            -e SGLANG_VLM_CACHE_SIZE_MB=0 \
+            -e SGLANG_VLM_CACHE_SIZE_MB=${MODEL_VLM_CACHE_SIZE_MB} \
             -e SGLANG_BENCHMARK_PORT=${{ env.SGLANG_BENCHMARK_PORT }} \
             -e SGLANG_BENCHMARK_EXAMPLE_ROOT=${{ env.SGLANG_BENCHMARK_EXAMPLE_ROOT }} \
             -e SGLANG_BENCHMARK_RESULTS_DIR=${{ env.SGLANG_BENCHMARK_RESULTS_DIR }} \
@@ -227,32 +264,20 @@ jobs:
         run: |
           docker exec sglang_test bash -lc "df -h /dev/shm"
           docker exec sglang_test bash -lc "ls -lah /models"
-          docker exec sglang_test bash -lc "du -sh ${{ env.MODEL_PATH }}"
+          docker exec sglang_test bash -lc "du -sh \"${MODEL_PATH}\""
 
       - name: Launch the server
         timeout-minutes: 60
         run: |
           set -ex
-          model_name=${{ matrix.model }}
-          if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-          else
-            echo "Unknown model_name: ${model_name}"
-            exit 1
-          fi
+          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh launch \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
 
       - name: Run GSM8K accuracy evaluation
         if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy') }}
         timeout-minutes: 45
         run: |
           set -ex
-          model_name=${{ matrix.model }}
-          if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation ${model_name} ${{ env.MODEL_PATH }} 8 1"
-          else
-            echo "Unknown model_name: ${model_name}"
-            exit 1
-          fi
+          docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh evaluation \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1"
 
       - name: Collect GSM8K accuracy summary
         if: ${{ success() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'accuracy')) }}
@@ -293,25 +318,19 @@ jobs:
         timeout-minutes: 300
         run: |
           set -ex
-          model_name=${{ matrix.model }}
-          if [ "$model_name" == "${{ env.MODEL_NAME }}" ]; then
-            case "${{ env.BENCHMARK_TARGET }}" in
-              all)
-                docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh concurrency ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-                docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh request_rate ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-                ;;
-              concurrency|request_rate)
-                docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh ${{ env.BENCHMARK_TARGET }} ${model_name} ${{ env.MODEL_PATH }} 8 1 45"
-                ;;
-              *)
-                echo "Unknown benchmark_target: ${{ env.BENCHMARK_TARGET }}"
-                exit 1
-                ;;
-            esac
-          else
-            echo "Unknown model_name: ${model_name}"
-            exit 1
-          fi
+          case "${BENCHMARK_TARGET}" in
+            all)
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh concurrency \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh request_rate \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
+              ;;
+            concurrency|request_rate)
+              docker exec sglang_test bash -lc "bash scripts/ci/sglang_benchmark_workflow.sh ${BENCHMARK_TARGET} \"${MODEL_NAME}\" \"${MODEL_PATH}\" \"${MODEL_TP}\" 1 45"
+              ;;
+            *)
+              echo "Unknown benchmark_target: ${BENCHMARK_TARGET}"
+              exit 1
+              ;;
+          esac
 
       - name: Collect benchmark summary
         if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_mode == 'benchmark')) }}

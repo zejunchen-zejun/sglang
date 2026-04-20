@@ -11,6 +11,7 @@ TIMEOUT=${6:-45}
 PORT=${SGLANG_BENCHMARK_PORT:-8080}
 GSM8K_NUM_QUESTIONS=${SGLANG_BENCHMARK_GSM8K_NUM_QUESTIONS:-200}
 GSM8K_PARALLEL=${SGLANG_BENCHMARK_GSM8K_PARALLEL:-128}
+GSM8K_MAX_NEW_TOKENS=${SGLANG_BENCHMARK_GSM8K_MAX_NEW_TOKENS:-4096}
 ACCURACY_RESULTS_DIR=${SGLANG_BENCHMARK_ACCURACY_RESULTS_DIR:-accuracy_test_results}
 SERVER_LOG=${SGLANG_BENCHMARK_SERVER_LOG:-/tmp/sglang_qwen35_server.log}
 BENCHMARK_RESULTS_DIR=${SGLANG_BENCHMARK_RESULTS_DIR:-benchmark_test_results}
@@ -66,6 +67,50 @@ wait_for_server() {
     tail -n 200 "${SERVER_LOG}" || true
   fi
   return 1
+}
+
+print_launch_recipe() {
+  local model=${1}
+  local attention_backend=${2}
+
+  echo
+  echo "========== LAUNCH ENVIRONMENT =========="
+  echo "export SGLANG_DISABLE_CUDNN_CHECK=${SGLANG_DISABLE_CUDNN_CHECK}"
+  echo "export SGLANG_USE_CUDA_IPC_TRANSPORT=${SGLANG_USE_CUDA_IPC_TRANSPORT}"
+  echo "export SGLANG_VLM_CACHE_SIZE_MB=${SGLANG_VLM_CACHE_SIZE_MB}"
+  echo "export SGLANG_USE_AITER=${SGLANG_USE_AITER}"
+  echo "export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=${SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE}"
+  echo "export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=${SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB}"
+  echo "export SGLANG_USE_AITER_NEW_CA=${SGLANG_USE_AITER_NEW_CA}"
+  if [[ -n "${AITER_MOE_PADDING_SIZE:-}" ]]; then
+    echo "export AITER_MOE_PADDING_SIZE=${AITER_MOE_PADDING_SIZE}"
+  fi
+
+  echo
+  echo "setup server for TP${TP}:"
+  cat <<EOF
+nohup python3 -m sglang.launch_server \\
+  --port ${PORT} \\
+  --model-path ${model} \\
+  --tp-size ${TP} \\
+  --attention-backend ${attention_backend} \\
+  --reasoning-parser qwen3 \\
+  --tool-call-parser qwen3_coder \\
+  --enable-multimodal \\
+  --trust-remote-code \\
+  --chunked-prefill-size 32768 \\
+  --mem-fraction-static 0.9 \\
+  --max-prefill-tokens 32768 \\
+  --max-running-requests 128 \\
+EOF
+  if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+    echo "  --disable-custom-all-reduce \\"
+  fi
+  cat <<EOF
+  --disable-radix-cache \\
+  --mm-attention-backend aiter_attn \\
+  > ${SERVER_LOG} 2>&1 &
+EOF
 }
 
 smoke_test_server() {
@@ -212,24 +257,35 @@ if [[ "${TYPE}" == "launch" ]]; then
   pkill -f "python3 -m sglang.launch_server" || true
   rm -f "${SERVER_LOG}"
   model="${MODEL_PATH}"
+  attention_backend="aiter"
+  if [[ "${MODEL_NAME}" == "Qwen3.5-27B-PTPC-compressor" ]]; then
+    attention_backend="triton"
+  fi
 
-  nohup python3 -m sglang.launch_server \
-    --port "${PORT}" \
-    --model-path "${model}" \
-    --tp-size "${TP}" \
-    --attention-backend aiter \
-    --reasoning-parser qwen3 \
-    --tool-call-parser qwen3_coder \
-    --enable-multimodal \
-    --trust-remote-code \
-    --chunked-prefill-size 32768 \
-    --mem-fraction-static 0.9 \
-    --max-prefill-tokens 32768 \
-    --max-running-requests 128 \
-    --disable-custom-all-reduce \
-    --disable-radix-cache \
-    --mm-attention-backend aiter_attn \
-    > "${SERVER_LOG}" 2>&1 &
+  launch_args=(
+    --port "${PORT}"
+    --model-path "${model}"
+    --tp-size "${TP}"
+    --attention-backend "${attention_backend}"
+    --reasoning-parser qwen3
+    --tool-call-parser qwen3_coder
+    --enable-multimodal
+    --trust-remote-code
+    --chunked-prefill-size 32768
+    --mem-fraction-static 0.9
+    --max-prefill-tokens 32768
+    --max-running-requests 128
+    --disable-radix-cache
+    --mm-attention-backend aiter_attn
+  )
+
+  if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+    launch_args+=(--disable-custom-all-reduce)
+  fi
+
+  print_launch_recipe "${model}" "${attention_backend}"
+
+  nohup python3 -m sglang.launch_server "${launch_args[@]}" > "${SERVER_LOG}" 2>&1 &
 
   if ! wait_for_server "${TIMEOUT}"; then
     pkill -f "python3 -m sglang.launch_server" || true
@@ -242,30 +298,48 @@ elif [[ "${TYPE}" == "evaluation" ]]; then
   echo
   echo "========== STARTING GSM8K ACCURACY EVALUATION =========="
   mkdir -p "${ACCURACY_RESULTS_DIR}"
+  result_jsonl="${ACCURACY_RESULTS_DIR}/${MODEL_NAME}_gsm8k_result.jsonl"
+  raw_result_file="${ACCURACY_RESULTS_DIR}/${MODEL_NAME}_gsm8k_raw_results.jsonl"
+  rm -f "${result_jsonl}" "${raw_result_file}"
+
+  benchmark_args=(
+    --host "http://127.0.0.1"
+    --port "${PORT}"
+    --backend srt
+    --parallel "${GSM8K_PARALLEL}"
+    --num-questions "${GSM8K_NUM_QUESTIONS}"
+    --result-file "${result_jsonl}"
+    --raw-result-file "${raw_result_file}"
+  )
+
+  if [[ "${MODEL_NAME}" != "offical_qwen3p5_397B_ptpc" ]]; then
+    benchmark_args+=(
+      --max-new-tokens "${GSM8K_MAX_NEW_TOKENS}"
+    )
+  fi
+
+  echo "Running benchmark/gsm8k/bench_sglang.py."
+  python3 benchmark/gsm8k/bench_sglang.py "${benchmark_args[@]}" \
+    | tee "gsm8k_accuracy_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+
   MODEL_NAME="${MODEL_NAME}" \
-  PORT="${PORT}" \
-  GSM8K_NUM_QUESTIONS="${GSM8K_NUM_QUESTIONS}" \
-  GSM8K_PARALLEL="${GSM8K_PARALLEL}" \
+  RESULT_JSONL="${result_jsonl}" \
   ACCURACY_RESULTS_DIR="${ACCURACY_RESULTS_DIR}" \
-  python3 - <<'PY' | tee "gsm8k_accuracy_${MODEL_NAME}_TP${TP}_EP${EP}.log"
+  python3 - <<'PY'
 import json
 import os
-from types import SimpleNamespace
+from pathlib import Path
 
-from sglang.test.few_shot_gsm8k import run_eval
+result_jsonl = Path(os.environ["RESULT_JSONL"])
+result_lines = [
+    line.strip()
+    for line in result_jsonl.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+if not result_lines:
+    raise SystemExit(f"No GSM8K benchmark results found in {result_jsonl}")
 
-metrics = run_eval(
-    SimpleNamespace(
-        num_shots=5,
-        data_path=None,
-        num_questions=int(os.environ["GSM8K_NUM_QUESTIONS"]),
-        max_new_tokens=512,
-        parallel=int(os.environ["GSM8K_PARALLEL"]),
-        host="http://127.0.0.1",
-        port=int(os.environ["PORT"]),
-        temperature=0.0,
-    )
-)
+metrics = json.loads(result_lines[-1])
 
 result_path = os.path.join(
     os.environ["ACCURACY_RESULTS_DIR"], f'{os.environ["MODEL_NAME"]}_gsm8k_results.json'
