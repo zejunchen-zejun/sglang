@@ -14,6 +14,8 @@ def fused_gdn_gating_sigmoid_kernel(
     a_ptr,
     b_ptr,
     dt_bias_ptr,
+    stride_a,
+    stride_b,
     NUM_HEADS: tl.constexpr,
     softplus_beta: tl.constexpr,
     softplus_threshold: tl.constexpr,
@@ -28,8 +30,8 @@ def fused_gdn_gating_sigmoid_kernel(
 
     blk_A_log = tl.load(A_log_ptr + head_off, mask=mask)
     blk_dt_bias = tl.load(dt_bias_ptr + head_off, mask=mask)
-    blk_a = tl.load(a_ptr + off, mask=mask)
-    blk_b = tl.load(b_ptr + off, mask=mask)
+    blk_a = tl.load(a_ptr + i_s * stride_a + head_off, mask=mask)
+    blk_b = tl.load(b_ptr + i_s * stride_b + head_off, mask=mask)
 
     # g = -exp(A_log) * softplus(a + dt_bias)
     x = blk_a.to(tl.float32) + blk_dt_bias.to(tl.float32)
@@ -58,8 +60,11 @@ def fused_gdn_gating_and_sigmoid(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused g and beta computation in single kernel."""
     seq_len, num_heads = a.shape
-    g = torch.empty_like(a, dtype=torch.float32)
-    beta = torch.empty_like(b, dtype=torch.float32)
+    g = torch.empty(seq_len, num_heads, dtype=torch.float32, device=a.device)
+    beta = torch.empty(seq_len, num_heads, dtype=torch.float32, device=b.device)
+    # Honor real strides; a/b may be non-contiguous split views (#22311).
+    stride_a = a.stride(0)
+    stride_b = b.stride(0)
 
     BLK_HEADS = triton.next_power_of_2(num_heads)
     grid = (seq_len,)
@@ -71,6 +76,8 @@ def fused_gdn_gating_and_sigmoid(
         a,
         b,
         dt_bias,
+        stride_a,
+        stride_b,
         num_heads,
         softplus_beta,
         softplus_threshold,
