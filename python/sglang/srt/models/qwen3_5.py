@@ -20,7 +20,10 @@ from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
-from sglang.jit_kernel.triton.gdn_fused_proj import scatter_fused_proj
+from sglang.jit_kernel.triton.gdn_fused_proj import (
+    fused_qkvzba_split_reshape_cat_contiguous,
+    scatter_fused_proj,
+)
 
 # Model Executor
 from sglang.srt.compilation.piecewise_context_manager import get_forward_context
@@ -118,6 +121,8 @@ QWEN3_5_PACKED_MODULES_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     "gate_up_proj": ["gate_proj", "up_proj"],
     "in_proj_fused": ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
+    "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+    "in_proj_ba": ["in_proj_b", "in_proj_a"],
 }
 
 
@@ -202,8 +207,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         )
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        # HIP BF16 full fusion: single GEMM for qkv+z+b+a
-        # FP8/quantized or non-HIP: two GEMMs (qkvz + ba)
+        # HIP BF16: single 6-way fused GEMM. Otherwise: two merged GEMMs
+        # (qkvz + ba) matching upstream.
         self._hip_bf16_full_fuse = _is_hip and quant_config is None
 
         if self._hip_bf16_full_fuse:
@@ -225,42 +230,31 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             )
             self._bind_packed_weight_loaders(self.in_proj_fused)
         else:
-            self.in_proj_qkv = MergedColumnParallelLinear(
+            self.in_proj_qkvz = MergedColumnParallelLinear(
                 input_size=self.hidden_size,
-                output_sizes=[self.key_dim, self.key_dim, self.value_dim],
+                output_sizes=[
+                    self.key_dim,
+                    self.key_dim,
+                    self.value_dim,
+                    self.value_dim,
+                ],
                 bias=False,
                 quant_config=quant_config,
                 tp_rank=self.attn_tp_rank,
                 tp_size=self.attn_tp_size,
-                prefix=add_prefix("in_proj_qkv", prefix),
+                prefix=add_prefix("in_proj_qkvz", prefix),
             )
-            self.in_proj_z = ColumnParallelLinear(
+            self.in_proj_ba = MergedColumnParallelLinear(
                 input_size=self.hidden_size,
-                output_size=self.value_dim,
+                output_sizes=[self.num_v_heads, self.num_v_heads],
                 bias=False,
                 quant_config=quant_config,
                 tp_rank=self.attn_tp_rank,
                 tp_size=self.attn_tp_size,
-                prefix=add_prefix("in_proj_z", prefix),
+                prefix=add_prefix("in_proj_ba", prefix),
             )
-            self.in_proj_b = ColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_size=self.num_v_heads,
-                bias=False,
-                quant_config=quant_config,
-                tp_rank=self.attn_tp_rank,
-                tp_size=self.attn_tp_size,
-                prefix=add_prefix("in_proj_b", prefix),
-            )
-            self.in_proj_a = ColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_size=self.num_v_heads,
-                bias=False,
-                quant_config=quant_config,
-                tp_rank=self.attn_tp_rank,
-                tp_size=self.attn_tp_size,
-                prefix=add_prefix("in_proj_a", prefix),
-            )
+            self._bind_packed_weight_loaders(self.in_proj_qkvz)
+            self._bind_packed_weight_loaders(self.in_proj_ba)
 
         self._qkv_size_local = (
             self.key_dim // self.attn_tp_size * 2
@@ -391,10 +385,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
 
     @classmethod
     def _make_packed_weight_loader(cls, module, original_weight_loader):
-        """Wrap the param's original loader so split checkpoint shards
-        (e.g. in_proj_qkv + in_proj_z + in_proj_b + in_proj_a -> in_proj_fused)
-        can load correctly for both normal and FP8 params.
-        """
+        """Wrap the param's original loader so split checkpoint shards load
+        correctly into in_proj_fused / in_proj_qkvz / in_proj_ba (incl. FP8)."""
 
         def weight_loader(param, loaded_weight, loaded_shard_id=None):
             # Only intercept split-checkpoint tuple shards.
@@ -430,19 +422,33 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         return weight_loader
 
 
+    def fix_query_key_value_ordering(
+        self,
+        mixed_qkvz: torch.Tensor,
+        mixed_ba: torch.Tensor,
+    ):
+        """Split merged qkvz / ba into q,k,v,z,b,a (b/a are non-contiguous views)."""
+        k_tp = self.key_dim // self.attn_tp_size
+        v_tp = self.value_dim // self.attn_tp_size
+        nv_tp = self.num_v_heads // self.attn_tp_size
+
+        query, key, value, z = mixed_qkvz.split([k_tp, k_tp, v_tp, v_tp], dim=-1)
+        b, a = mixed_ba.split([nv_tp, nv_tp], dim=-1)
+
+        value = value.reshape(value.size(0), -1, self.head_v_dim)
+        z = z.reshape(z.size(0), -1, self.head_v_dim)
+
+        return query, key, value, z, b, a
+
     def _forward_input_proj(self, hidden_states: torch.Tensor):
+        """Run GDN input projections; in HIP BF16 mode `proj_ba` is None."""
         if self._hip_bf16_full_fuse:
             fused_out, _ = self.in_proj_fused(hidden_states)
-            return fused_out, None, None, None
+            return fused_out, None
 
-        mixed_qkv, _ = self.in_proj_qkv(hidden_states)
-        z, _ = self.in_proj_z(hidden_states)
-        z = z.reshape(z.size(0), -1, self.head_v_dim)
-        b, _ = self.in_proj_b(hidden_states)
-        a, _ = self.in_proj_a(hidden_states)
-        b = b.contiguous()
-        a = a.contiguous()
-        return mixed_qkv, z, b, a
+        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        return projected_states_qkvz, projected_states_ba
 
     def forward(
         self,
@@ -471,11 +477,11 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         2. Core attention (custom op)
         3. Output projection
         """
-        mixed_qkv, z, b, a = self._forward_input_proj(hidden_states)
+        proj_qkvz, proj_ba = self._forward_input_proj(hidden_states)
 
         if self._hip_bf16_full_fuse:
             seq_len = hidden_states.shape[0]
-            fused_out = mixed_qkv
+            fused_out = proj_qkvz
             if seq_len >= 4:
                 mixed_qkv, z, b, a = scatter_fused_proj(
                     fused_out,
@@ -494,6 +500,28 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 b = fused_out[:, z_end:b_end].contiguous()
                 a = fused_out[:, b_end:a_end].contiguous()
             z = z.reshape(hidden_states.size(0), -1, self.head_v_dim)
+        elif self.num_v_heads // self.num_k_heads in (1, 2, 4):
+            # Fast path: fused split/reshape/cat into contiguous outputs.
+            mixed_qkv, z, b, a = fused_qkvzba_split_reshape_cat_contiguous(
+                proj_qkvz,
+                proj_ba,
+                self.num_k_heads // self.attn_tp_size,
+                self.num_v_heads // self.attn_tp_size,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+        else:
+            # Fallback for v_per_group=3 (Qwen3.5-27B); needs stride-aware GDN kernels.
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                proj_qkvz, proj_ba
+            )
+            query, key, value = (
+                query.reshape(query.shape[0], -1),
+                key.reshape(key.shape[0], -1),
+                value.reshape(value.shape[0], -1),
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
+
         core_attn_out = self.attn(
             forward_batch,
             mixed_qkv=mixed_qkv,
@@ -1037,6 +1065,13 @@ class Qwen3_5ForCausalLM(nn.Module):
                 ("in_proj_fused.", "in_proj_b.", 4),
                 ("in_proj_fused.", "in_proj_a.", 5),
             ]
+        else:
+            stacked_params_mapping += [
+                ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                ("in_proj_qkvz.", "in_proj_z.", 3),
+                ("in_proj_ba.", "in_proj_b.", 0),
+                ("in_proj_ba.", "in_proj_a.", 1),
+            ]
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -1115,6 +1150,13 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                 ("in_proj_fused.", "in_proj_z.", 3),
                 ("in_proj_fused.", "in_proj_b.", 4),
                 ("in_proj_fused.", "in_proj_a.", 5),
+            ]
+        else:
+            stacked_params_mapping += [
+                ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                ("in_proj_qkvz.", "in_proj_z.", 3),
+                ("in_proj_ba.", "in_proj_b.", 0),
+                ("in_proj_ba.", "in_proj_a.", 1),
             ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -1341,6 +1383,13 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 ("in_proj_fused.", "in_proj_b.", 4),
                 ("in_proj_fused.", "in_proj_a.", 5),
             ]
+        else:
+            stacked_params_mapping += [
+                ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                ("in_proj_qkvz.", "in_proj_z.", 3),
+                ("in_proj_ba.", "in_proj_b.", 0),
+                ("in_proj_ba.", "in_proj_a.", 1),
+            ]
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -1439,6 +1488,13 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 ("in_proj_fused.", "in_proj_z.", 3),
                 ("in_proj_fused.", "in_proj_b.", 4),
                 ("in_proj_fused.", "in_proj_a.", 5),
+            ]
+        else:
+            stacked_params_mapping += [
+                ("in_proj_qkvz.", "in_proj_qkv.", (0, 1, 2)),
+                ("in_proj_qkvz.", "in_proj_z.", 3),
+                ("in_proj_ba.", "in_proj_b.", 0),
+                ("in_proj_ba.", "in_proj_a.", 1),
             ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales

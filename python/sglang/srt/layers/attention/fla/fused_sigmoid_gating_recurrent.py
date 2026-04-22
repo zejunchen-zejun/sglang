@@ -57,6 +57,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     cu_seqlens,
     scale,
     T,
+    stride_a,
+    stride_b,
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -93,16 +95,16 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     p_q = q + (bos * H + i_h) * K + o_k
     p_k = k + (bos * H + i_h) * K + o_k
     p_v = v + (bos * HV + i_hv) * V + o_v
-    p_b = b + bos * HV + i_hv
+    p_b = b + bos * stride_b + i_hv
     p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
 
     # Gating computation pointers
     p_A_log = A_log + i_hv
     if IS_KDA:
-        p_a = a + (bos * HV + i_hv) * K + o_k
+        p_a = a + bos * stride_a + i_hv * K + o_k
         p_dt_bias = dt_bias + i_hv * K + o_k
     else:
-        p_a = a + bos * HV + i_hv
+        p_a = a + bos * stride_a + i_hv
         p_dt_bias = dt_bias + i_hv
 
     mask_k = o_k < K
@@ -180,8 +182,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         p_k += H * K
         p_o += HV * V
         p_v += HV * V
-        p_b += HV
-        p_a += HV
+        p_b += stride_b
+        p_a += stride_a
 
     # Store final state back to h0_source with bounds checking
     if USE_INITIAL_STATE:
@@ -222,6 +224,9 @@ def fused_sigmoid_gating_delta_rule_update(
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
+    # Token-axis stride; covers both 2D [T,...] and 3D [B,T,...] layouts (#22311).
+    stride_a = a.stride()[-2]
+    stride_b = b.stride()[-2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
     BK = triton.next_power_of_2(K)
     NK = triton.cdiv(K, BK)
@@ -251,6 +256,8 @@ def fused_sigmoid_gating_delta_rule_update(
         cu_seqlens=cu_seqlens,
         scale=scale,
         T=T,
+        stride_a=stride_a,
+        stride_b=stride_b,
         B=B,
         H=H,
         HV=HV,
