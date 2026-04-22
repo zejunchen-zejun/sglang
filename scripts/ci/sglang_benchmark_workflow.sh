@@ -193,6 +193,7 @@ rewrite_external_benchmark_runtime_config() {
 
   python3 - "${benchmark_type}" "${work_dir}" "${PORT}" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 benchmark_type = sys.argv[1]
@@ -241,6 +242,28 @@ for path in work_dir.rglob("*"):
     new_text = text
     for old, new in patterns:
         new_text = new_text.replace(old, new)
+
+    if path.suffix == ".py" and "add_argument" in new_text and "--port" in new_text:
+        updated_lines = []
+        python_port_rewritten = False
+        for line in new_text.splitlines():
+            if "--port" in line and "add_argument" in line and "default" in line:
+                rewritten_line = re.sub(
+                    r"default\s*=\s*(\d+)",
+                    lambda match: (
+                        'default=int(os.environ.get("SGLANG_BENCHMARK_PORT", '
+                        f'"{match.group(1)}"))'
+                    ),
+                    line,
+                )
+                if rewritten_line != line:
+                    python_port_rewritten = True
+                line = rewritten_line
+            updated_lines.append(line)
+        if python_port_rewritten:
+            new_text = "\n".join(updated_lines)
+            if "import os" not in new_text:
+                new_text = "import os\n" + new_text
 
     if new_text != text:
         path.write_text(new_text, encoding="utf-8")
