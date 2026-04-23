@@ -853,14 +853,8 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 self.conv_states_shape[-1] < FLA_CHUNK_SIZE
             ), f"{self.conv_states_shape[-1]=} should be less than {FLA_CHUNK_SIZE}"
 
-        # HIP inline-ASM GDN decode. Scheme #4 (KV<->VK state transpose
-        # amortised) was originally executed per-layer at the entry/exit of
-        # ``forward_extend`` (96 launches per prefill chunk for Qwen3.5).
-        # We now hoist the transpose to the backend level and execute it
-        # ONCE per forward pass on the boundary where the layout actually
-        # changes, using a single multi-layer batched kernel guarded by a
-        # per-slot layout bitmap so slots already in the target layout are
-        # skipped without any CPU sync.
+        # HIP inline-ASM GDN decode: one batched multi-layer transpose
+        # per pass at the layout boundary, gated per-slot.
         self._hip_kernel_func = None
         self._state_transpose_fn = None  # legacy single-layer (unused when batched fn exists)
         self._batched_state_transpose_fn = None
@@ -909,10 +903,8 @@ class GDNAttnBackend(MambaAttnBackendBase):
                     device=full_temporal.device,
                 )
                 rank0_log(
-                    "HIP GDN decode loaded (scheme #4 batched): single "
-                    f"multi-layer transpose kernel ({self._num_mamba_layers} "
-                    "layers, per-slot layout gate); per-layer prologue/"
-                    "epilogue removed from forward_extend."
+                    f"HIP GDN decode loaded ({self._num_mamba_layers} "
+                    "layers, batched multi-layer transpose, per-slot gate)."
                 )
             except Exception as e:
                 rank0_log(
@@ -934,31 +926,13 @@ class GDNAttnBackend(MambaAttnBackendBase):
             else fused_sigmoid_gating_delta_rule_update
         )
 
-    def _maybe_apply_layout_transition(self, forward_mode):
-        """Backend-level state-layout state machine for HIP GDN decode.
-
-        Replaces the per-layer prologue/epilogue transposes inside
-        forward_extend (was 96 launches per prefill chunk). Single
-        multi-layer transpose launch, gated per-slot by ``self._slot_layout``
-        so slots already in the target layout are no-op (no CPU sync).
-
-        target_layout:
-          - DECODE pass:  VK (HIP kernel reads/writes VK)
-          - any other pass that calls forward_extend (EXTEND/MIXED/...): KV
-            (FLA prefill reads/writes KV)
-          - TARGET_VERIFY / IDLE: skip — fused_recurrent uses its own layout
-            convention; no GDN spec-decode in the supported configs.
-        """
+    def _eager_apply_layout_transition(self, target_layout: int):
+        """Launch the multi-layer transpose for ``target_layout``."""
         if self._batched_state_transpose_fn is None:
-            return
-        if forward_mode.is_target_verify() or forward_mode.is_idle():
             return
         cache_indices = self.forward_metadata.mamba_cache_indices
         if cache_indices is None or cache_indices.numel() == 0:
             return
-        target_layout = (
-            self._layout_vk if forward_mode.is_decode() else self._layout_kv
-        )
         self._batched_state_transpose_fn(
             self._full_temporal_state,
             cache_indices,
@@ -967,22 +941,22 @@ class GDNAttnBackend(MambaAttnBackendBase):
             self._num_mamba_layers,
             self._num_v_heads_per_layer,
         )
-        # Record new layout for slots used in this pass. clamp(min=0) maps
-        # CUDA-graph padding (-1) to slot 0 (the pad slot), whose layout is
-        # never read.
-        valid = cache_indices.clamp(min=0).long()
-        self._slot_layout.index_fill_(0, valid, target_layout)
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         super().init_forward_metadata(forward_batch)
-        self._maybe_apply_layout_transition(forward_batch.forward_mode)
+        forward_mode = forward_batch.forward_mode
+        # EXTEND -> KV (FLA prefill); DECODE -> VK (HIP-ASM decode).
+        if forward_mode.is_extend() and not forward_mode.is_target_verify():
+            self._eager_apply_layout_transition(self._layout_kv)
+        elif forward_mode.is_decode_or_idle():
+            self._eager_apply_layout_transition(self._layout_vk)
         # Hoist `extend_prefix_lens > 0` (compare_scalar_kernel<int>) out of
         # forward_extend — that comparison only depends on forward_batch and
         # was previously launched 48 times (once per GDN layer) per chunk.
         self._cached_has_initial_states = None
         if (
-            forward_batch.forward_mode.is_extend()
-            and not forward_batch.forward_mode.is_target_verify()
+            forward_mode.is_extend()
+            and not forward_mode.is_target_verify()
             and forward_batch.extend_prefix_lens is not None
         ):
             self._cached_has_initial_states = (
@@ -1010,7 +984,9 @@ class GDNAttnBackend(MambaAttnBackendBase):
             spec_info,
             seq_lens_cpu,
         )
-        self._maybe_apply_layout_transition(forward_mode)
+        # Ensure VK before the captured decode graph runs.
+        if forward_mode.is_decode_or_idle():
+            self._eager_apply_layout_transition(self._layout_vk)
 
     def forward_decode(
         self,
@@ -1021,6 +997,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
         b: torch.Tensor,
         **kwargs,  # Unused, for compatibility with HybridLinearAttnBackend
     ):
+        # KV -> VK transition happens in init_forward_metadata{,_replay_cuda_graph}.
         layer_cache = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
         conv_states = layer_cache.conv[0]
         ssm_states = layer_cache.temporal
@@ -1057,12 +1034,8 @@ class GDNAttnBackend(MambaAttnBackendBase):
         value = value.view(1, bs, layer.num_v_heads, layer.head_v_dim)
 
         if self._hip_kernel_func is not None:
-            # Scheme #4: ssm_states for live slots are already in VK layout,
-            # transposed once at end of forward_extend after FLA prefill. The
-            # HIP decode kernel consumes VK and writes back VK in place.
-            # Padding slots from CUDA Graph replay carry pool_idx == -1; the
-            # kernel body itself early-exits on `pool_idx < 0`, so we pass
-            # cache_indices straight through (no per-layer clamp launch).
+            # ssm_states are already in VK; HIP decode kernel reads/writes VK in place.
+            # CUDA-graph padding (pool_idx == -1) is handled inside the kernel.
             core_attn_out = self._hip_kernel_func(
                 A_log=layer.A_log.float(),
                 dt_bias=layer.dt_bias,
@@ -1124,14 +1097,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
         mamba_cache_params = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
         conv_states = mamba_cache_params.conv[0]
         ssm_states = mamba_cache_params.temporal
-        # Scheme #4 (batched): the VK<->KV state-layout transition is now
-        # handled ONCE per forward pass at the backend level (see
-        # GDNAttnBackend._maybe_apply_layout_transition in
-        # init_forward_metadata / init_forward_metadata_replay_cuda_graph).
-        # No per-layer prologue / epilogue transpose here — eliminates
-        # 2 * num_layers (=96 for Qwen3.5) state_transpose launches per
-        # prefill chunk, plus the redundant `compare_scalar_kernel<int>`
-        # that the previous per-layer code path triggered.
+        # VK<->KV transition is handled in init_forward_metadata{,_replay_cuda_graph}.
         if is_target_verify:
             assert isinstance(mamba_cache_params, MambaPool.SpeculativeState)
             intermediate_state_cache = mamba_cache_params.intermediate_ssm
@@ -1291,11 +1257,8 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 forward_batch, h, ssm_states, forward_metadata
             )
 
-            # Scheme #4 epilogue removed — the KV→VK transpose now happens
-            # once at the next decode pass entry (see
-            # _maybe_apply_layout_transition). After this layer's FLA prefill
-            # the slots referenced by cache_indices are in KV layout; they
-            # will be lazily transitioned to VK on demand.
+            # KV→VK is deferred to the next decode pass entry
+            # (_eager_apply_layout_transition).
 
         return core_attn_out
 
