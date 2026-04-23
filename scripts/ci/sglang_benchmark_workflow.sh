@@ -164,10 +164,18 @@ prepare_external_benchmark_environment() {
   local alias_path
   local alias_root
   local model_basename
+  local -a alias_names
 
   model_basename=$(basename "${MODEL_PATH}")
+  alias_names=("${MODEL_NAME}" "${model_basename}")
 
-  for alias_name in "${MODEL_NAME}" "${model_basename}"; do
+  # Some external benchmark scripts still hardcode the 397B alias even when
+  # running the 27B model, so provide that compatibility path per job.
+  if [[ "${MODEL_NAME}" != "offical_qwen3p5_397B_ptpc" ]]; then
+    alias_names+=("offical_qwen3p5_397B_ptpc")
+  fi
+
+  for alias_name in "${alias_names[@]}"; do
     [[ -n "${alias_name}" ]] || continue
     for alias_root in \
       "/data/models" \
@@ -209,6 +217,14 @@ patterns = [
     ("https://127.0.0.1:8080", f"https://127.0.0.1:{port}"),
     ("127.0.0.1:8080", f"127.0.0.1:{port}"),
     ("localhost:8080", f"localhost:{port}"),
+    (
+        "default=8080",
+        f'default=int(os.environ.get("SGLANG_BENCHMARK_PORT", "{port}"))',
+    ),
+    (
+        "default = 8080",
+        f'default = int(os.environ.get("SGLANG_BENCHMARK_PORT", "{port}"))',
+    ),
     ("--port 8080", f"--port {port}"),
     ("port=8080", f"port={port}"),
     ("port = 8080", f"port = {port}"),
