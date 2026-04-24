@@ -853,6 +853,65 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 self.conv_states_shape[-1] < FLA_CHUNK_SIZE
             ), f"{self.conv_states_shape[-1]=} should be less than {FLA_CHUNK_SIZE}"
 
+        # HIP inline-ASM GDN decode: one batched multi-layer transpose
+        # per pass at the layout boundary, gated per-slot.
+        self._hip_kernel_func = None
+        self._state_transpose_fn = None  # legacy single-layer (unused when batched fn exists)
+        self._batched_state_transpose_fn = None
+        self._slot_layout: Optional[torch.Tensor] = None
+        self._full_temporal_state: Optional[torch.Tensor] = None
+        self._num_mamba_layers: int = 0
+        self._num_v_heads_per_layer: int = 0
+        self._layout_kv: int = 0
+        self._layout_vk: int = 1
+        if _is_hip:
+            try:
+                from aiter.ops.hip.gated_delta_net import (
+                    LAYOUT_KV,
+                    LAYOUT_VK,
+                    hip_fused_sigmoid_gating_delta_rule_update,
+                    hip_state_transpose_inplace,
+                    hip_state_transpose_inplace_multi_layer,
+                )
+                from aiter.ops.hip.gated_delta_net.hip_gdn_decode import (
+                    _load_extension,
+                )
+
+                _load_extension()
+                self._hip_kernel_func = hip_fused_sigmoid_gating_delta_rule_update
+                self._state_transpose_fn = hip_state_transpose_inplace
+                self._batched_state_transpose_fn = (
+                    hip_state_transpose_inplace_multi_layer
+                )
+                self._layout_kv = LAYOUT_KV
+                self._layout_vk = LAYOUT_VK
+
+                # Cache full temporal_state tensor (layout
+                # [num_layers, slots+1, num_v_heads, K, V]) and per-slot
+                # layout bitmap (int8, init 0=KV, fresh slots are zeros so
+                # KV is the safe default — FLA prefill writes KV, transpose
+                # to VK happens lazily on first decode entry).
+                mamba_pool = model_runner.req_to_token_pool.mamba_pool
+                full_temporal = mamba_pool.mamba_cache.temporal
+                self._full_temporal_state = full_temporal
+                self._num_mamba_layers = full_temporal.shape[0]
+                self._num_v_heads_per_layer = full_temporal.shape[2]
+                total_slots = full_temporal.shape[1]
+                self._slot_layout = torch.zeros(
+                    total_slots,
+                    dtype=torch.int8,
+                    device=full_temporal.device,
+                )
+                rank0_log(
+                    f"HIP GDN decode loaded ({self._num_mamba_layers} "
+                    "layers, batched multi-layer transpose, per-slot gate)."
+                )
+            except Exception as e:
+                rank0_log(
+                    f"HIP GDN decode support failed to load: {e}. "
+                    "Continuing with the existing decode kernel."
+                )
+
         use_cutedsl = Envs.SGLANG_USE_CUTEDSL_GDN_DECODE.get()
         if use_cutedsl and cutedsl_fused_sigmoid_gating_delta_rule_update is None:
             rank0_log(
@@ -867,6 +926,68 @@ class GDNAttnBackend(MambaAttnBackendBase):
             else fused_sigmoid_gating_delta_rule_update
         )
 
+    def _eager_apply_layout_transition(self, target_layout: int):
+        """Launch the multi-layer transpose for ``target_layout``."""
+        if self._batched_state_transpose_fn is None:
+            return
+        cache_indices = self.forward_metadata.mamba_cache_indices
+        if cache_indices is None or cache_indices.numel() == 0:
+            return
+        self._batched_state_transpose_fn(
+            self._full_temporal_state,
+            cache_indices,
+            self._slot_layout,
+            target_layout,
+            self._num_mamba_layers,
+            self._num_v_heads_per_layer,
+        )
+
+    def init_forward_metadata(self, forward_batch: ForwardBatch):
+        super().init_forward_metadata(forward_batch)
+        forward_mode = forward_batch.forward_mode
+        # EXTEND -> KV (FLA prefill); DECODE -> VK (HIP-ASM decode).
+        if forward_mode.is_extend() and not forward_mode.is_target_verify():
+            self._eager_apply_layout_transition(self._layout_kv)
+        elif forward_mode.is_decode_or_idle():
+            self._eager_apply_layout_transition(self._layout_vk)
+        # Hoist `extend_prefix_lens > 0` (compare_scalar_kernel<int>) out of
+        # forward_extend — that comparison only depends on forward_batch and
+        # was previously launched 48 times (once per GDN layer) per chunk.
+        self._cached_has_initial_states = None
+        if (
+            forward_mode.is_extend()
+            and not forward_mode.is_target_verify()
+            and forward_batch.extend_prefix_lens is not None
+        ):
+            self._cached_has_initial_states = (
+                forward_batch.extend_prefix_lens > 0
+            )
+
+    def init_forward_metadata_replay_cuda_graph(
+        self,
+        bs: int,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_sum: int,
+        encoder_lens: Optional[torch.Tensor],
+        forward_mode: ForwardMode,
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+        seq_lens_cpu: Optional[torch.Tensor],
+    ):
+        super().init_forward_metadata_replay_cuda_graph(
+            bs,
+            req_pool_indices,
+            seq_lens,
+            seq_lens_sum,
+            encoder_lens,
+            forward_mode,
+            spec_info,
+            seq_lens_cpu,
+        )
+        # Ensure VK before the captured decode graph runs.
+        if forward_mode.is_decode_or_idle():
+            self._eager_apply_layout_transition(self._layout_vk)
+
     def forward_decode(
         self,
         layer: RadixLinearAttention,
@@ -876,6 +997,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
         b: torch.Tensor,
         **kwargs,  # Unused, for compatibility with HybridLinearAttnBackend
     ):
+        # KV -> VK transition happens in init_forward_metadata{,_replay_cuda_graph}.
         layer_cache = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
         conv_states = layer_cache.conv[0]
         ssm_states = layer_cache.temporal
@@ -911,21 +1033,40 @@ class GDNAttnBackend(MambaAttnBackendBase):
         key = key.view(1, bs, layer.num_k_heads, layer.head_k_dim)
         value = value.view(1, bs, layer.num_v_heads, layer.head_v_dim)
 
-        core_attn_out = self._kernel_func(
-            A_log=layer.A_log,
-            dt_bias=layer.dt_bias,
-            q=query,
-            k=key,
-            v=value,
-            a=a,
-            b=b,
-            initial_state_source=ssm_states,
-            initial_state_indices=cache_indices,
-            cu_seqlens=query_start_loc,
-            use_qk_l2norm_in_kernel=True,
-            softplus_beta=1.0,
-            softplus_threshold=20.0,
-        )
+        if self._hip_kernel_func is not None:
+            # ssm_states are already in VK; HIP decode kernel reads/writes VK in place.
+            # CUDA-graph padding (pool_idx == -1) is handled inside the kernel.
+            core_attn_out = self._hip_kernel_func(
+                A_log=layer.A_log.float(),
+                dt_bias=layer.dt_bias,
+                q=query,
+                k=key,
+                v=value,
+                a=a,
+                b=b,
+                initial_state_source=ssm_states,
+                initial_state_indices=cache_indices,
+                cu_seqlens=query_start_loc,
+                use_qk_l2norm_in_kernel=True,
+                softplus_beta=1.0,
+                softplus_threshold=20.0,
+            )
+        else:
+            core_attn_out = self._kernel_func(
+                A_log=layer.A_log,
+                dt_bias=layer.dt_bias,
+                q=query,
+                k=key,
+                v=value,
+                a=a,
+                b=b,
+                initial_state_source=ssm_states,
+                initial_state_indices=cache_indices,
+                cu_seqlens=query_start_loc,
+                use_qk_l2norm_in_kernel=True,
+                softplus_beta=1.0,
+                softplus_threshold=20.0,
+            )
 
         self._track_mamba_state_decode(
             forward_batch, conv_states, ssm_states, cache_indices
@@ -956,6 +1097,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
         mamba_cache_params = self.req_to_token_pool.mamba2_layer_cache(layer.layer_id)
         conv_states = mamba_cache_params.conv[0]
         ssm_states = mamba_cache_params.temporal
+        # VK<->KV transition is handled in init_forward_metadata{,_replay_cuda_graph}.
         if is_target_verify:
             assert isinstance(mamba_cache_params, MambaPool.SpeculativeState)
             intermediate_state_cache = mamba_cache_params.intermediate_ssm
@@ -971,7 +1113,14 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 cache_indices.shape[0], dtype=torch.int32, device=cache_indices.device
             )
         else:
-            has_initial_states = forward_batch.extend_prefix_lens > 0
+            # Reuse compare_scalar result computed once per pass in
+            # init_forward_metadata; falling back only if the cache is not
+            # populated (e.g., under unusual call paths).
+            has_initial_states = (
+                self._cached_has_initial_states
+                if getattr(self, "_cached_has_initial_states", None) is not None
+                else forward_batch.extend_prefix_lens > 0
+            )
 
         if is_target_verify:
             batch_size = seq_len // forward_batch.spec_info.draft_token_num
@@ -1107,6 +1256,9 @@ class GDNAttnBackend(MambaAttnBackendBase):
             self._track_mamba_state_extend(
                 forward_batch, h, ssm_states, forward_metadata
             )
+
+            # KV→VK is deferred to the next decode pass entry
+            # (_eager_apply_layout_transition).
 
         return core_attn_out
 
