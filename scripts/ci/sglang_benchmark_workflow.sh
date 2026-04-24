@@ -207,6 +207,7 @@ import sys
 benchmark_type = sys.argv[1]
 work_dir = Path(sys.argv[2])
 port = sys.argv[3]
+port_default_expr = f'int(os.environ.get("SGLANG_BENCHMARK_PORT", "{port}"))'
 
 if benchmark_type != "request_rate" or port == "8080":
     raise SystemExit(0)
@@ -259,27 +260,32 @@ for path in work_dir.rglob("*"):
     for old, new in patterns:
         new_text = new_text.replace(old, new)
 
+    python_port_rewritten = False
+
     if path.suffix == ".py" and "add_argument" in new_text and "--port" in new_text:
+        new_text, multiline_count = re.subn(
+            r'(?P<prefix>add_argument\(\s*(?:"--port"|\'--port\')[\s\S]{0,240}?default\s*=\s*)(?P<port>\d+)',
+            lambda match: f"{match.group('prefix')}{port_default_expr}",
+            new_text,
+            flags=re.MULTILINE,
+        )
+        python_port_rewritten = multiline_count > 0
+
         updated_lines = []
-        python_port_rewritten = False
         for line in new_text.splitlines():
             if "--port" in line and "add_argument" in line and "default" in line:
                 rewritten_line = re.sub(
                     r"default\s*=\s*(\d+)",
-                    lambda match: (
-                        'default=int(os.environ.get("SGLANG_BENCHMARK_PORT", '
-                        f'"{match.group(1)}"))'
-                    ),
+                    lambda match: f"default={port_default_expr}",
                     line,
                 )
                 if rewritten_line != line:
                     python_port_rewritten = True
                 line = rewritten_line
             updated_lines.append(line)
-        if python_port_rewritten:
-            new_text = "\n".join(updated_lines)
-            if "import os" not in new_text:
-                new_text = "import os\n" + new_text
+        new_text = "\n".join(updated_lines)
+        if python_port_rewritten and "import os" not in new_text:
+            new_text = "import os\n" + new_text
 
     if new_text != text:
         path.write_text(new_text, encoding="utf-8")
