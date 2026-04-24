@@ -446,9 +446,29 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         if self._hip_bf16_full_fuse:
             fused_out, _ = self.in_proj_fused(hidden_states)
             return fused_out, None
-
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        # if (
+        #     _is_cpu
+        #     or _is_npu
+        #     or not get_global_server_args().disable_piecewise_cuda_graph
+        # ):
+        #     DUAL_STREAM_TOKEN_THRESHOLD = 0
+        # else:
+        #     DUAL_STREAM_TOKEN_THRESHOLD = 1024
+        # seq_len, _ = hidden_states.shape
+        if (
+            self.alt_stream is not None
+            and get_is_capture_mode()
+            # and seq_len < DUAL_STREAM_TOKEN_THRESHOLD
+        ):
+            current_stream = torch.cuda.current_stream()
+            self.alt_stream.wait_stream(current_stream)
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            with torch.cuda.stream(self.alt_stream):
+                projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            current_stream.wait_stream(self.alt_stream)
+        else:
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_states_ba, _ = self.in_proj_ba(hidden_states)
         return projected_states_qkvz, projected_states_ba
 
     def forward(
