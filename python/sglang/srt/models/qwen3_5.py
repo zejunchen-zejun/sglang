@@ -811,6 +811,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
 
         self.alt_stream = alt_stream
+        self.alt_stream_event = torch.cuda.Event()
 
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
@@ -818,13 +819,13 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         """Apply Q/K normalization with optional alt_stream overlap."""
         if self.alt_stream is not None and get_is_capture_mode():
             current_stream = torch.cuda.current_stream()
-            self.alt_stream.wait_stream(current_stream)
             q_by_head = q.reshape(-1, self.head_dim)
             q_by_head = self.q_norm(q_by_head)
             with torch.cuda.stream(self.alt_stream):
                 k_by_head = k.reshape(-1, self.head_dim)
                 k_by_head = self.k_norm(k_by_head)
-            current_stream.wait_stream(self.alt_stream)
+                self.alt_stream_event.record(self.alt_stream)
+            current_stream.wait_event(self.alt_stream_event)
         else:
             q_by_head = q.reshape(-1, self.head_dim)
             q_by_head = self.q_norm(q_by_head)
@@ -940,7 +941,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         self.hidden_size = config.hidden_size
         self.pp_group = get_pp_group()
 
-        alt_stream = torch.cuda.Stream() if _is_cuda else None
+        alt_stream = torch.cuda.Stream() if _is_cuda or _is_hip else None
 
         # Embedding layer
         if self.pp_group.is_first_rank:
