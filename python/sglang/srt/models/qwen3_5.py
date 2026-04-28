@@ -103,6 +103,7 @@ _is_hip = is_hip()
 _is_npu = is_npu()
 _is_cpu = is_cpu()
 _is_amx_available = cpu_has_amx_support()
+_is_hip_altstream = get_bool_env_var("SGLANG_ALT_STREAM", "False")
 
 if _is_hip:
     from sglang.srt.layers.elementwise import fused_sigmoid_mul, fused_sigmoid_mul_broadcast
@@ -961,7 +962,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         self.hidden_size = config.hidden_size
         self.pp_group = get_pp_group()
 
-        alt_stream = torch.cuda.Stream() if _is_cuda or _is_hip else None
+        alt_stream = torch.cuda.Stream() if _is_cuda or _is_hip_altstream else None
 
         # Embedding layer
         if self.pp_group.is_first_rank:
