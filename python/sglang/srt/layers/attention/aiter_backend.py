@@ -5,6 +5,7 @@ end to end attention solution with aiter kernels
 """
 
 import logging
+import os
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Optional
@@ -37,6 +38,7 @@ try:
         mla_prefill_ps_asm_fwd,
         mla_reduce_v1,
         paged_attention_ragged,
+        paged_attention_ragged_nhd,
     )
     from aiter.mla import mla_decode_fwd, mla_prefill_fwd
 except ImportError:
@@ -91,10 +93,8 @@ class ForwardMetadata:
     run_graph: Optional[bool] = True
 
 
-global_workspace_buffer = None
 
-_AITER_PARTITION_SIZE_ROCM = 256
-
+_AITER_PARTITION_SIZE_ROCM = 256 # 256 512 1024 for paged_attention_ragged_nhd
 
 class AiterAttnBackend(AttentionBackend):
     def __init__(
@@ -167,17 +167,28 @@ class AiterAttnBackend(AttentionBackend):
         self.max_num_partitions = (
             self.max_context_len + _AITER_PARTITION_SIZE_ROCM - 1
         ) // _AITER_PARTITION_SIZE_ROCM
-
         nbyes_per_qo_elem = torch.finfo(torch.float32).bits // 8
 
         if not self.use_mla:
-            self.workspace_buffer = torch.empty(
-                (max_bs * self.num_head * self.max_num_partitions * self.head_dim)
-                * nbyes_per_qo_elem
-                + 2 * (max_bs * self.num_head * self.max_num_partitions) * 4,
-                dtype=torch.uint8,
-                device=self.device,
-            )
+            # self.workspace_buffer = torch.empty(
+            #     (max_bs * self.num_head * self.max_num_partitions * self.head_dim)
+            #     * nbyes_per_qo_elem
+            #     + 2 * (max_bs * self.num_head * self.max_num_partitions) * 4,
+            #     dtype=torch.uint8,
+            #     device=self.device,
+            # ).contiguous()
+            # aiter pa_ragged_nhd: three tensors (no single uint8 blob + host pointer math).
+            _nhp = max_bs * self.num_head * self.max_num_partitions
+            self.pa_nhd_exp_sums = torch.empty(
+                (_nhp,), dtype=torch.float32, device=self.device
+            ).contiguous()
+            self.pa_nhd_max_logits = torch.empty(
+                (_nhp,), dtype=torch.float32, device=self.device
+            ).contiguous()
+            self.pa_nhd_tmp_out = torch.empty(
+                (_nhp * self.head_dim,), dtype=torch.bfloat16, device=self.device
+            ).contiguous()
+
 
         self.scale = float(1.0 / (self.head_dim**0.5))
         self.k_scale = self.v_scale = torch.tensor([1.0], dtype=torch.float32).to(
@@ -1558,6 +1569,7 @@ class AiterAttnBackend(AttentionBackend):
             )
         else:
             o = torch.empty_like(q, dtype=self.input_dtype)
+            #o_nhd = torch.empty_like(q, dtype=self.input_dtype)  # use for debug
 
         if save_kv_cache:
             forward_batch.token_to_kv_pool.set_kv_buffer(
@@ -1629,10 +1641,11 @@ class AiterAttnBackend(AttentionBackend):
 
                 k_cache = k_cache.to(dtype)
                 v_cache = v_cache.to(dtype)
-
-            paged_attention_ragged(
+            paged_attention_ragged_nhd(
                 o.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
-                self.workspace_buffer,
+                self.pa_nhd_exp_sums,
+                self.pa_nhd_max_logits,
+                self.pa_nhd_tmp_out,
                 q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
                 k_cache.view(-1, 1, layer.tp_k_head_num, layer.qk_head_dim),
                 v_cache.view(-1, 1, layer.tp_v_head_num, layer.v_head_dim),
@@ -1651,6 +1664,27 @@ class AiterAttnBackend(AttentionBackend):
                 None,
                 _AITER_PARTITION_SIZE_ROCM,
             )
+            # paged_attention_ragged(
+            #     o.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+            #     self.workspace_buffer,
+            #     q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+            #     k_cache.view(-1, 1, layer.tp_k_head_num, layer.qk_head_dim),
+            #     v_cache.view(-1, 1, layer.tp_v_head_num, layer.v_head_dim),
+            #     self.scale,
+            #     self.forward_metadata.kv_indptr,
+            #     self.forward_metadata.kv_indices,
+            #     self.kv_last_page_len,
+            #     1,
+            #     self.max_num_partitions,
+            #     None,
+            #     "auto",
+            #     "NHD",
+            #     self.logits_soft_cap,
+            #     self.k_scale,
+            #     self.v_scale,
+            #     None,
+            #     _AITER_PARTITION_SIZE_ROCM,
+            # )
 
         return o
 
