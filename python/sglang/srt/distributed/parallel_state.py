@@ -732,6 +732,72 @@ class GroupCoordinator:
             inplace_all_reduce(input_, group_name=self.unique_name)
             return input_
 
+    def fused_allreduce_rmsnorm(
+        self,
+        input_: torch.Tensor,
+        residual_inp_: torch.Tensor,
+        weight_: torch.Tensor,
+        eps: float,
+        prefill_support: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.world_size == 1:
+            return self._fused_allreduce_rmsnorm_out_place(
+                input_, residual_inp_, weight_, eps, prefill_support
+            )
+
+        return self._fused_allreduce_rmsnorm_out_place(
+            input_, residual_inp_, weight_, eps, prefill_support
+        )
+
+    def _fused_allreduce_rmsnorm_out_place(
+        self,
+        input_: torch.Tensor,
+        residual_inp_: torch.Tensor,
+        weight_: torch.Tensor,
+        eps: float,
+        prefill_support: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ca_comm = self.ca_comm
+        total_bytes = input_.numel() * input_.element_size()
+        can_use_fused_ar_rms = (
+            int(input_.shape[-1]) <= 16384
+            and total_bytes < 8 * 1024 * 8192
+            and self.world_size != 6
+        )
+        if (
+            ca_comm is not None
+            and not ca_comm.disabled
+            and hasattr(ca_comm, "custom_fused_ar_rms")
+            and ca_comm.should_custom_ar(input_)
+            and can_use_fused_ar_rms
+        ):
+            if prefill_support or total_bytes <= 64 * 1024 * 1024:
+                use_1stage_override = {"1": True, "0": False}.get(
+                    os.environ.get("AITER_AR_1STAGE", "")
+                )
+                use_1stage = (
+                    use_1stage_override
+                    if use_1stage_override is not None
+                    else (total_bytes <= 128 * 1024)
+                )
+                out = ca_comm.custom_fused_ar_rms(
+                    input_,
+                    residual_inp_,
+                    weight_,
+                    eps,
+                    use_1stage,
+                )
+                if out is not None:
+                    return out
+
+        ar_out = self.all_reduce(input_)
+        residual_out = ar_out + residual_inp_
+        residual_fp32 = residual_out.to(torch.float32)
+        variance = residual_fp32.pow(2).mean(dim=-1, keepdim=True)
+        out = residual_fp32 * torch.rsqrt(variance + eps)
+        out = (out * weight_.to(torch.float32)).to(ar_out.dtype)
+        return out, residual_out
+
     def _all_reduce_out_place(
         self, input_: torch.Tensor, outplace_all_reduce_method: str
     ) -> torch.Tensor:
