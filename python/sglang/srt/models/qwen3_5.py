@@ -93,6 +93,7 @@ from sglang.srt.utils import (
     is_npu,
     make_layers,
     set_weight_attrs,
+    get_bool_env_var,
 )
 from sglang.srt.utils.hf_transformers_utils import get_processor
 
@@ -124,7 +125,6 @@ QWEN3_5_PACKED_MODULES_MAPPING = {
     "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
     "in_proj_ba": ["in_proj_b", "in_proj_a"],
 }
-CUDA_EVENT_FOR_ALT_STREAM = True
 
 
 class Qwen3_5SparseMoeBlock(Qwen2MoeSparseMoeBlock):
@@ -832,14 +832,12 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
 
         self.alt_stream = alt_stream
-        if CUDA_EVENT_FOR_ALT_STREAM:
-            self.alt_stream_event = torch.cuda.Event()
 
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply Q/K normalization with optional alt_stream overlap."""
-        if self.alt_stream is not None and get_is_capture_mode():
+        if self.alt_stream is not None and get_is_capture_mode() and get_bool_env_var("SGLANG_QK_NORM_ALT_STREAM", "False"):
             current_stream = torch.cuda.current_stream()
             self.alt_stream.wait_stream(current_stream)
             q_by_head = q.reshape(-1, self.head_dim)
@@ -847,12 +845,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             with torch.cuda.stream(self.alt_stream):
                 k_by_head = k.reshape(-1, self.head_dim)
                 k_by_head = self.k_norm(k_by_head)
-                if CUDA_EVENT_FOR_ALT_STREAM:
-                    self.alt_stream_event.record(self.alt_stream)
-            if CUDA_EVENT_FOR_ALT_STREAM:
-                current_stream.wait_event(self.alt_stream_event)
-            else:
-                current_stream.wait_stream(self.alt_stream)
+            current_stream.wait_stream(self.alt_stream)
         else:
             q_by_head = q.reshape(-1, self.head_dim)
             q_by_head = self.q_norm(q_by_head)
