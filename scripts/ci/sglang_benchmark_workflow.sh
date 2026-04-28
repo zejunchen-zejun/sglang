@@ -209,7 +209,7 @@ work_dir = Path(sys.argv[2])
 port = sys.argv[3]
 port_default_expr = f'int(os.environ.get("SGLANG_BENCHMARK_PORT", "{port}"))'
 
-if benchmark_type != "request_rate" or port == "8080":
+if port == "8080":
     raise SystemExit(0)
 
 patterns = [
@@ -231,6 +231,10 @@ patterns = [
     ("port = 8080", f"port = {port}"),
     ('"port": 8080', f'"port": {port}'),
 ]
+
+env_port_assignment_re = re.compile(
+    r"(?m)^(?P<prefix>\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*PORT[A-Za-z0-9_]*\s*=\s*)(?P<quote>[\"']?)8080(?P=quote)(?P<suffix>\s*(?:#.*)?)$"
+)
 
 modified_files = []
 candidate_suffixes = {
@@ -287,12 +291,20 @@ for path in work_dir.rglob("*"):
         if python_port_rewritten and "import os" not in new_text:
             new_text = "import os\n" + new_text
 
+    new_text, _ = env_port_assignment_re.subn(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}{port}"
+            f"{match.group('quote')}{match.group('suffix')}"
+        ),
+        new_text,
+    )
+
     if new_text != text:
         path.write_text(new_text, encoding="utf-8")
         modified_files.append(str(path.relative_to(work_dir)))
 
 print(
-    f"Rewrote request_rate benchmark runtime config to use port {port} "
+    f"Rewrote {benchmark_type} benchmark runtime config to use port {port} "
     f"in {len(modified_files)} file(s)."
 )
 for file_name in modified_files:
