@@ -1569,7 +1569,6 @@ class AiterAttnBackend(AttentionBackend):
             )
         else:
             o = torch.empty_like(q, dtype=self.input_dtype)
-            #o_nhd = torch.empty_like(q, dtype=self.input_dtype)  # use for debug
 
         if save_kv_cache:
             forward_batch.token_to_kv_pool.set_kv_buffer(
