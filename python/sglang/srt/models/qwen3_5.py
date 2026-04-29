@@ -93,6 +93,7 @@ from sglang.srt.utils import (
     is_npu,
     make_layers,
     set_weight_attrs,
+    get_bool_env_var,
 )
 from sglang.srt.utils.hf_transformers_utils import get_processor
 
@@ -102,6 +103,7 @@ _is_hip = is_hip()
 _is_npu = is_npu()
 _is_cpu = is_cpu()
 _is_amx_available = cpu_has_amx_support()
+_is_hip_altstream = get_bool_env_var("SGLANG_ALT_STREAM", "False")
 
 if _is_hip:
     from sglang.srt.layers.elementwise import fused_sigmoid_mul, fused_sigmoid_mul_broadcast
@@ -445,9 +447,29 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         if self._hip_bf16_full_fuse:
             fused_out, _ = self.in_proj_fused(hidden_states)
             return fused_out, None
-
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        # if (
+        #     _is_cpu
+        #     or _is_npu
+        #     or not get_global_server_args().disable_piecewise_cuda_graph
+        # ):
+        #     DUAL_STREAM_TOKEN_THRESHOLD = 0
+        # else:
+        #     DUAL_STREAM_TOKEN_THRESHOLD = 1024
+        # seq_len, _ = hidden_states.shape
+        if (
+            self.alt_stream is not None
+            and get_is_capture_mode()
+            # and seq_len < DUAL_STREAM_TOKEN_THRESHOLD
+        ):
+            current_stream = torch.cuda.current_stream()
+            self.alt_stream.wait_stream(current_stream)
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            with torch.cuda.stream(self.alt_stream):
+                projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            current_stream.wait_stream(self.alt_stream)
+        else:
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_states_ba, _ = self.in_proj_ba(hidden_states)
         return projected_states_qkvz, projected_states_ba
 
     def forward(
@@ -816,7 +838,7 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         self, q: torch.Tensor, k: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply Q/K normalization with optional alt_stream overlap."""
-        if self.alt_stream is not None and get_is_capture_mode():
+        if self.alt_stream is not None and get_is_capture_mode() and get_bool_env_var("SGLANG_QK_NORM_ALT_STREAM", "False"):
             current_stream = torch.cuda.current_stream()
             self.alt_stream.wait_stream(current_stream)
             q_by_head = q.reshape(-1, self.head_dim)
@@ -940,7 +962,7 @@ class Qwen3_5ForCausalLM(nn.Module):
         self.hidden_size = config.hidden_size
         self.pp_group = get_pp_group()
 
-        alt_stream = torch.cuda.Stream() if _is_cuda else None
+        alt_stream = torch.cuda.Stream() if _is_cuda or _is_hip_altstream else None
 
         # Embedding layer
         if self.pp_group.is_first_rank:
