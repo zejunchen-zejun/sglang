@@ -49,10 +49,12 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.spec_info import SpecInput
-from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_npu
+from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_npu, get_bool_env_var
 from sglang.srt.utils.common import rank0_log
 
 _is_hip = is_hip()
+_use_hip_linear_attn = get_bool_env_var("USE_HIP_LINEAR_ATTN", "False")
+
 
 if not is_cpu() and not is_npu():
     # fix import error on CPU device, no impacts when non-CPU path
@@ -864,7 +866,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
         self._num_v_heads_per_layer: int = 0
         self._layout_kv: int = 0
         self._layout_vk: int = 1
-        if _is_hip:
+        if _use_hip_linear_attn and _is_hip:
             try:
                 from aiter.ops.hip.gated_delta_net import (
                     LAYOUT_KV,
