@@ -9,6 +9,13 @@ from einops import rearrange
 
 from sglang.srt.environ import Envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.attention.gdn_decode_backend_selector import (
+    get_local_gdn_head_shape,
+    select_vk_gdn_decode_backend,
+    supports_hip_gdn_decode_runtime,
+    sync_gdn_slot_layout_after_copy,
+    target_gdn_state_layout,
+)
 from sglang.srt.layers.attention.fla.fused_gdn_gating import fused_gdn_gating
 from sglang.srt.layers.attention.fla.fused_gdn_gating_prefill import (
     fused_gdn_gating_and_sigmoid,
@@ -212,6 +219,42 @@ def track_mamba_states_if_needed(
         conv_state_numel_per_row,
         ssm_state_numel_per_row,
         BLOCK_SIZE,
+    )
+
+
+@triton.jit
+def sync_gdn_slot_layout_after_masked_copy_kernel(
+    slot_layout_ptr,
+    cache_indices_ptr,
+    mamba_track_mask_ptr,
+    mamba_track_indices_ptr,
+):
+    batch_idx = tl.program_id(0)
+    track_mask = tl.load(mamba_track_mask_ptr + batch_idx)
+    if not track_mask:
+        return
+
+    src_idx = tl.load(cache_indices_ptr + batch_idx)
+    dst_idx = tl.load(mamba_track_indices_ptr + batch_idx)
+    layout = tl.load(slot_layout_ptr + src_idx)
+    tl.store(slot_layout_ptr + dst_idx, layout)
+
+
+def sync_gdn_slot_layout_after_masked_copy(
+    slot_layout: Optional[torch.Tensor],
+    cache_indices: torch.Tensor,
+    mamba_track_mask: torch.Tensor,
+    mamba_track_indices: torch.Tensor,
+    batch_size: int,
+):
+    if slot_layout is None or batch_size == 0:
+        return
+
+    sync_gdn_slot_layout_after_masked_copy_kernel[(batch_size,)](
+        slot_layout,
+        cache_indices,
+        mamba_track_mask,
+        mamba_track_indices,
     )
 
 
@@ -635,6 +678,13 @@ class MambaAttnBackendBase(AttentionBackend):
                 forward_batch.mamba_track_indices,
                 forward_batch.batch_size,
             )
+            sync_gdn_slot_layout_after_masked_copy(
+                getattr(self, "_slot_layout", None),
+                cache_indices,
+                forward_batch.mamba_track_mask,
+                forward_batch.mamba_track_indices,
+                forward_batch.batch_size,
+            )
 
     def _track_mamba_state_extend(
         self,
@@ -665,10 +715,19 @@ class MambaAttnBackendBase(AttentionBackend):
                 ssm_states[forward_metadata.track_ssm_h_dst] = h[
                     forward_metadata.track_ssm_h_src
                 ].to(ssm_states.dtype, copy=False)
+                if self._slot_layout is not None:
+                    self._slot_layout[forward_metadata.track_ssm_h_dst.long()] = (
+                        self._layout_kv
+                    )
             if forward_metadata.track_ssm_final_src.numel() > 0:
                 ssm_states[forward_metadata.track_ssm_final_dst] = ssm_states[
                     forward_metadata.track_ssm_final_src
                 ]
+                sync_gdn_slot_layout_after_copy(
+                    self._slot_layout,
+                    forward_metadata.track_ssm_final_src,
+                    forward_metadata.track_ssm_final_dst,
+                )
 
 
 class KimiLinearAttnBackend(MambaAttnBackendBase):
@@ -855,9 +914,13 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 self.conv_states_shape[-1] < FLA_CHUNK_SIZE
             ), f"{self.conv_states_shape[-1]=} should be less than {FLA_CHUNK_SIZE}"
 
-        # HIP inline-ASM GDN decode: one batched multi-layer transpose
-        # per pass at the layout boundary, gated per-slot.
-        self._hip_kernel_func = None
+        # VK decode backend with batched multi-layer transpose at layout boundaries.
+        self._vk_gdn_decode_kernel_func = None
+        self._vk_gdn_decode_backend: Optional[str] = None
+        self._vk_gdn_decode_reset_sort_cache_fn = None
+        self._vk_flydsl_layer_runner_factory = None
+        self._vk_flydsl_layer_runners = {}
+        self._vk_decode_active_batch_size: Optional[int] = None
         self._state_transpose_fn = None  # legacy single-layer (unused when batched fn exists)
         self._batched_state_transpose_fn = None
         self._slot_layout: Optional[torch.Tensor] = None
@@ -867,11 +930,32 @@ class GDNAttnBackend(MambaAttnBackendBase):
         self._layout_kv: int = 0
         self._layout_vk: int = 1
         if _use_hip_linear_attn and _is_hip:
+            local_num_k_heads = None
+            local_num_v_heads = None
+            try:
+                local_num_k_heads, local_num_v_heads = get_local_gdn_head_shape(
+                    model_runner.model_config.hf_text_config.linear_num_key_heads,
+                    model_runner.model_config.hf_text_config.linear_num_value_heads,
+                    model_runner.tp_size,
+                )
+            except Exception as e:
+                rank0_log(
+                    f"GDN decode local head detection failed: {e}. "
+                    "Continuing with the existing decode kernel."
+                )
+
+            hip_vk_kernel_func = None
+            flydsl_vk_kernel_func = None
+            state_transpose_fn = None
+            batched_state_transpose_fn = None
+            layout_kv = self._layout_kv
+            layout_vk = self._layout_vk
             try:
                 from aiter.ops.hip.gated_delta_net import (
                     LAYOUT_KV,
                     LAYOUT_VK,
                     hip_fused_sigmoid_gating_delta_rule_update,
+                    hip_gdn_decode_reset_sort_cache,
                     hip_state_transpose_inplace,
                     hip_state_transpose_inplace_multi_layer,
                 )
@@ -880,39 +964,104 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 )
 
                 _load_extension()
-                self._hip_kernel_func = hip_fused_sigmoid_gating_delta_rule_update
-                self._state_transpose_fn = hip_state_transpose_inplace
-                self._batched_state_transpose_fn = (
-                    hip_state_transpose_inplace_multi_layer
+                hip_vk_kernel_func = hip_fused_sigmoid_gating_delta_rule_update
+                self._vk_gdn_decode_reset_sort_cache_fn = (
+                    hip_gdn_decode_reset_sort_cache
                 )
-                self._layout_kv = LAYOUT_KV
-                self._layout_vk = LAYOUT_VK
-
-                # Cache full temporal_state tensor (layout
-                # [num_layers, slots+1, num_v_heads, K, V]) and per-slot
-                # layout bitmap (int8, init 0=KV, fresh slots are zeros so
-                # KV is the safe default — FLA prefill writes KV, transpose
-                # to VK happens lazily on first decode entry).
-                mamba_pool = model_runner.req_to_token_pool.mamba_pool
-                full_temporal = mamba_pool.mamba_cache.temporal
-                self._full_temporal_state = full_temporal
-                self._num_mamba_layers = full_temporal.shape[0]
-                self._num_v_heads_per_layer = full_temporal.shape[2]
-                total_slots = full_temporal.shape[1]
-                self._slot_layout = torch.zeros(
-                    total_slots,
-                    dtype=torch.int8,
-                    device=full_temporal.device,
-                )
-                rank0_log(
-                    f"HIP GDN decode loaded ({self._num_mamba_layers} "
-                    "layers, batched multi-layer transpose, per-slot gate)."
-                )
+                state_transpose_fn = hip_state_transpose_inplace
+                batched_state_transpose_fn = hip_state_transpose_inplace_multi_layer
+                layout_kv = LAYOUT_KV
+                layout_vk = LAYOUT_VK
             except Exception as e:
                 rank0_log(
-                    f"HIP GDN decode support failed to load: {e}. "
+                    f"HIP GDN VK support failed to load: {e}. "
                     "Continuing with the existing decode kernel."
                 )
+
+            if batched_state_transpose_fn is not None:
+                try:
+                    from aiter.ops.hip.gated_delta_net.hip_gdn_decode_flydsl import (
+                        create_flydsl_gdn_decode_layer_runner,
+                        flydsl_fused_sigmoid_gating_delta_rule_update,
+                    )
+
+                    flydsl_vk_kernel_func = (
+                        flydsl_fused_sigmoid_gating_delta_rule_update
+                    )
+                    self._vk_flydsl_layer_runner_factory = (
+                        create_flydsl_gdn_decode_layer_runner
+                    )
+                except Exception as e:
+                    rank0_log(
+                        f"FlyDSL GDN decode support failed to load: {e}. "
+                        "Unsupported shapes will keep the existing decode kernel."
+                    )
+
+            if local_num_k_heads is not None and local_num_v_heads is not None:
+                mamba_pool = model_runner.req_to_token_pool.mamba_pool
+                full_temporal = mamba_pool.mamba_cache.temporal
+                model_dtype = getattr(
+                    model_runner.model_config,
+                    "dtype",
+                    getattr(model_runner, "dtype", torch.bfloat16),
+                )
+                hf_text_config = model_runner.model_config.hf_text_config
+                hip_decode_available = (
+                    hip_vk_kernel_func is not None
+                    and supports_hip_gdn_decode_runtime(
+                        local_num_k_heads=local_num_k_heads,
+                        local_num_v_heads=local_num_v_heads,
+                        q_dtype=model_dtype,
+                        k_dtype=model_dtype,
+                        v_dtype=model_dtype,
+                        a_dtype=model_dtype,
+                        b_dtype=model_dtype,
+                        dt_bias_dtype=model_dtype,
+                        state_dtype=full_temporal.dtype,
+                        head_k_dim=hf_text_config.linear_key_head_dim,
+                        head_v_dim=hf_text_config.linear_value_head_dim,
+                        state_shape=tuple(full_temporal.shape[1:]),
+                    )
+                )
+                selected_vk_backend = select_vk_gdn_decode_backend(
+                    local_num_k_heads,
+                    local_num_v_heads,
+                    hip_decode_available=hip_decode_available,
+                    flydsl_decode_available=flydsl_vk_kernel_func is not None,
+                )
+                if selected_vk_backend == "hip":
+                    self._vk_gdn_decode_kernel_func = hip_vk_kernel_func
+                elif selected_vk_backend == "flydsl":
+                    self._vk_gdn_decode_kernel_func = flydsl_vk_kernel_func
+
+                if self._vk_gdn_decode_kernel_func is not None:
+                    self._vk_gdn_decode_backend = selected_vk_backend
+                    self._state_transpose_fn = state_transpose_fn
+                    self._batched_state_transpose_fn = batched_state_transpose_fn
+                    self._layout_kv = layout_kv
+                    self._layout_vk = layout_vk
+
+                    self._full_temporal_state = full_temporal
+                    self._num_mamba_layers = full_temporal.shape[0]
+                    self._num_v_heads_per_layer = full_temporal.shape[2]
+                    total_slots = full_temporal.shape[1]
+                    self._slot_layout = torch.zeros(
+                        total_slots,
+                        dtype=torch.int8,
+                        device=full_temporal.device,
+                    )
+                    rank0_log(
+                        f"{selected_vk_backend.upper()} GDN decode loaded "
+                        f"(local heads {local_num_k_heads}/{local_num_v_heads}, "
+                        f"{self._num_mamba_layers} layers, batched multi-layer "
+                        "transpose, per-slot gate)."
+                    )
+                else:
+                    rank0_log(
+                        "No VK GDN decode backend for local heads "
+                        f"{local_num_k_heads}/{local_num_v_heads}. "
+                        "Continuing with the existing decode kernel."
+                    )
 
         use_cutedsl = Envs.SGLANG_USE_CUTEDSL_GDN_DECODE.get()
         if use_cutedsl and cutedsl_fused_sigmoid_gating_delta_rule_update is None:
@@ -944,14 +1093,31 @@ class GDNAttnBackend(MambaAttnBackendBase):
             self._num_v_heads_per_layer,
         )
 
+    def _prepare_gdn_layout_for_forward_mode(self, forward_mode: ForwardMode):
+        target_layout = target_gdn_state_layout(
+            is_extend=forward_mode.is_extend(),
+            is_target_verify=forward_mode.is_target_verify(),
+            is_decode_or_idle=forward_mode.is_decode_or_idle(),
+            layout_kv=self._layout_kv,
+            layout_vk=self._layout_vk,
+        )
+        if target_layout is not None:
+            self._eager_apply_layout_transition(target_layout)
+        if (
+            target_layout == self._layout_vk
+            and self._vk_gdn_decode_backend == "hip"
+            and self._vk_gdn_decode_reset_sort_cache_fn is not None
+        ):
+            self._vk_gdn_decode_reset_sort_cache_fn()
+
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         super().init_forward_metadata(forward_batch)
         forward_mode = forward_batch.forward_mode
-        # EXTEND -> KV (FLA prefill); DECODE -> VK (HIP-ASM decode).
-        if forward_mode.is_extend() and not forward_mode.is_target_verify():
-            self._eager_apply_layout_transition(self._layout_kv)
-        elif forward_mode.is_decode_or_idle():
-            self._eager_apply_layout_transition(self._layout_vk)
+        self._vk_decode_active_batch_size = None
+        # EXTEND/TARGET_VERIFY use KV; selected VK decode backends switch to VK lazily.
+        self._prepare_gdn_layout_for_forward_mode(forward_mode)
+        if forward_mode.is_decode_or_idle():
+            self._vk_decode_active_batch_size = forward_batch.batch_size
         # Hoist `extend_prefix_lens > 0` (compare_scalar_kernel<int>) out of
         # forward_extend — that comparison only depends on forward_batch and
         # was previously launched 48 times (once per GDN layer) per chunk.
@@ -964,6 +1130,30 @@ class GDNAttnBackend(MambaAttnBackendBase):
             self._cached_has_initial_states = (
                 forward_batch.extend_prefix_lens > 0
             )
+
+    def init_forward_metadata_capture_cuda_graph(
+        self,
+        bs: int,
+        num_tokens: int,
+        req_pool_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        encoder_lens: Optional[torch.Tensor],
+        forward_mode: ForwardMode,
+        spec_info: Optional[Union[EagleDraftInput, EagleVerifyInput]],
+    ):
+        super().init_forward_metadata_capture_cuda_graph(
+            bs,
+            num_tokens,
+            req_pool_indices,
+            seq_lens,
+            encoder_lens,
+            forward_mode,
+            spec_info,
+        )
+        self._vk_decode_active_batch_size = None
+        self._prepare_gdn_layout_for_forward_mode(forward_mode)
+        if forward_mode.is_decode_or_idle():
+            self._vk_decode_active_batch_size = bs
 
     def init_forward_metadata_replay_cuda_graph(
         self,
@@ -986,9 +1176,19 @@ class GDNAttnBackend(MambaAttnBackendBase):
             spec_info,
             seq_lens_cpu,
         )
-        # Ensure VK before the captured decode graph runs.
+        self._vk_decode_active_batch_size = None
+        # Ensure the captured graph sees the layout required by this mode.
+        self._prepare_gdn_layout_for_forward_mode(forward_mode)
         if forward_mode.is_decode_or_idle():
-            self._eager_apply_layout_transition(self._layout_vk)
+            if seq_lens_cpu is None:
+                self._vk_decode_active_batch_size = bs
+            else:
+                num_padding = int(
+                    torch.count_nonzero(
+                        seq_lens_cpu == self.get_cuda_graph_seq_len_fill_value()
+                    )
+                )
+                self._vk_decode_active_batch_size = bs - num_padding
 
     def forward_decode(
         self,
@@ -1035,10 +1235,60 @@ class GDNAttnBackend(MambaAttnBackendBase):
         key = key.view(1, bs, layer.num_k_heads, layer.head_k_dim)
         value = value.view(1, bs, layer.num_v_heads, layer.head_v_dim)
 
-        if self._hip_kernel_func is not None:
-            # ssm_states are already in VK; HIP decode kernel reads/writes VK in place.
+        if (
+            self._vk_gdn_decode_backend == "flydsl"
+            and self._vk_flydsl_layer_runner_factory is not None
+        ):
+            active_batch_size = (
+                self._vk_decode_active_batch_size
+                if self._vk_decode_active_batch_size is not None
+                else bs
+            )
+            layer_runner = self._vk_flydsl_layer_runners.get(layer.layer_id)
+            if layer_runner is None:
+                layer_runner = self._vk_flydsl_layer_runner_factory(
+                    A_log=layer.A_log,
+                    dt_bias=layer.dt_bias,
+                    num_k_heads=layer.num_k_heads,
+                    num_v_heads=layer.num_v_heads,
+                    head_k_dim=layer.head_k_dim,
+                    head_v_dim=layer.head_v_dim,
+                    device=query.device,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                self._vk_flydsl_layer_runners[layer.layer_id] = layer_runner
+
+            core_attn_out = layer_runner(
+                q=query,
+                k=key,
+                v=value,
+                a=a,
+                b=b,
+                initial_state_source=ssm_states,
+                initial_state_indices=cache_indices,
+                cu_seqlens=query_start_loc,
+                active_batch_size=active_batch_size,
+            )
+        elif self._vk_gdn_decode_kernel_func is not None and (
+            self._vk_gdn_decode_backend != "hip"
+            or supports_hip_gdn_decode_runtime(
+                local_num_k_heads=layer.num_k_heads,
+                local_num_v_heads=layer.num_v_heads,
+                q_dtype=query.dtype,
+                k_dtype=key.dtype,
+                v_dtype=value.dtype,
+                a_dtype=a.dtype,
+                b_dtype=b.dtype,
+                dt_bias_dtype=layer.dt_bias.dtype,
+                state_dtype=ssm_states.dtype,
+                head_k_dim=layer.head_k_dim,
+                head_v_dim=layer.head_v_dim,
+                state_shape=tuple(ssm_states.shape),
+            )
+        ):
+            # ssm_states are already in VK; selected VK decode kernel reads/writes VK in place.
             # CUDA-graph padding (pool_idx == -1) is handled inside the kernel.
-            core_attn_out = self._hip_kernel_func(
+            core_attn_out = self._vk_gdn_decode_kernel_func(
                 A_log=layer.A_log.float(),
                 dt_bias=layer.dt_bias,
                 q=query,
@@ -1054,6 +1304,8 @@ class GDNAttnBackend(MambaAttnBackendBase):
                 softplus_threshold=20.0,
             )
         else:
+            if self._vk_gdn_decode_backend is not None:
+                self._eager_apply_layout_transition(self._layout_kv)
             core_attn_out = self._kernel_func(
                 A_log=layer.A_log,
                 dt_bias=layer.dt_bias,
