@@ -48,6 +48,7 @@ from sglang.srt.utils.common import (
     get_quantization_config,
     is_blackwell_supported,
     is_cuda,
+    is_cuda_alike,
     is_flashinfer_available,
     is_hip,
     is_hopper_with_cuda_12_3,
@@ -1727,7 +1728,7 @@ class ServerArgs:
 
         if self.enable_mamba_extra_buffer():  # extra_buffer
             assert (
-                is_cuda()
+                is_cuda_alike()
             ), "Mamba extra_buffer is only supported on CUDA devices with FLA backend"
             if self.speculative_num_draft_tokens is not None:
                 assert (
