@@ -1094,6 +1094,9 @@ class GDNAttnBackend(MambaAttnBackendBase):
         )
 
     def _prepare_gdn_layout_for_forward_mode(self, forward_mode: ForwardMode):
+        if self._vk_gdn_decode_backend is None:
+            return
+
         target_layout = target_gdn_state_layout(
             is_extend=forward_mode.is_extend(),
             is_target_verify=forward_mode.is_target_verify(),
