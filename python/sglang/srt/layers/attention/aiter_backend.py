@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.attention.merge_state import merge_state
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.layers.dp_attention import (
     get_attention_tp_size,
@@ -179,6 +180,156 @@ def reshape_and_cache_shuffle_triton(
         BLOCK_SIZE=head_size,
         QUANT=QUANT,
     )
+
+
+@triton.jit
+def _cp_mha_gather_cache_kernel(
+    key_cache_ptr,
+    value_cache_ptr,
+    key_ptr,
+    value_ptr,
+    block_table_ptr,
+    cu_seqlens_kv_ptr,
+    token_to_batch_ptr,
+    seq_start_ptr,
+    k_scale_ptr,
+    v_scale_ptr,
+    num_heads,
+    head_size,
+    x,
+    max_block_num,
+    DEQUANT: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    CACHE_FORMAT: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_id = tl.program_id(0)
+    head_id = tl.program_id(1)
+    col_offsets = tl.arange(0, BLOCK_SIZE)
+
+    key_ptr_offset = (
+        key_ptr + token_id * head_size * num_heads + head_id * head_size
+    )
+    value_ptr_offset = (
+        value_ptr + token_id * head_size * num_heads + head_id * head_size
+    )
+    batch_idx = tl.load(token_to_batch_ptr + token_id)
+    batch_start = tl.load(seq_start_ptr + batch_idx)
+    token_start = tl.load(cu_seqlens_kv_ptr + batch_idx)
+    batch_offset = token_id - token_start + batch_start
+    block_offset = batch_offset // PAGE_SIZE
+    block_id = tl.load(
+        block_table_ptr + max_block_num * batch_idx + block_offset
+    ).to(tl.int64)
+    slot_id = batch_offset % PAGE_SIZE
+
+    if CACHE_FORMAT == "NHD":
+        key_cache_ptr_offset = (
+            key_cache_ptr
+            + block_id * num_heads * head_size * PAGE_SIZE
+            + slot_id * num_heads * head_size
+            + head_id * head_size
+        )
+        value_cache_ptr_offset = (
+            value_cache_ptr
+            + block_id * num_heads * head_size * PAGE_SIZE
+            + slot_id * num_heads * head_size
+            + head_id * head_size
+        )
+        k_reg = tl.load(key_cache_ptr_offset + col_offsets)
+        v_reg = tl.load(value_cache_ptr_offset + col_offsets)
+        if DEQUANT:
+            k_scale = tl.load(k_scale_ptr)
+            v_scale = tl.load(v_scale_ptr)
+            k_dtype = k_reg.dtype
+            v_dtype = v_reg.dtype
+            k_reg = (k_reg.to(tl.float32) * k_scale).to(k_dtype)
+            v_reg = (v_reg.to(tl.float32) * v_scale).to(v_dtype)
+        tl.store(key_ptr_offset + col_offsets, k_reg)
+        tl.store(value_ptr_offset + col_offsets, v_reg)
+
+    elif CACHE_FORMAT == "SHUFFLE":
+        key_cache_ptr_offset = (
+            key_cache_ptr
+            + block_id * num_heads * head_size * PAGE_SIZE
+            + head_id * head_size * PAGE_SIZE
+            + slot_id * x
+        )
+        value_cache_ptr_offset = (
+            value_cache_ptr
+            + block_id * num_heads * head_size * PAGE_SIZE
+            + head_id * head_size * PAGE_SIZE
+            + (slot_id // x) * head_size * x
+            + slot_id % x
+        )
+        k_reg_offset = col_offsets // x * PAGE_SIZE * x + col_offsets % x
+        v_reg_offset = col_offsets * x
+        k_reg = tl.load(key_cache_ptr_offset + k_reg_offset)
+        v_reg = tl.load(value_cache_ptr_offset + v_reg_offset)
+        if DEQUANT:
+            k_scale = 1.0
+            v_scale = 1.0
+            k_reg = k_reg.to(tl.float32) * k_scale
+            v_reg = v_reg.to(tl.float32) * v_scale
+        tl.store(key_ptr_offset + col_offsets, k_reg)
+        tl.store(value_ptr_offset + col_offsets, v_reg)
+
+
+def cp_mha_gather_cache(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    block_tables: torch.Tensor,
+    k_scales: torch.Tensor,
+    v_scales: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    token_to_batch: torch.Tensor,
+    seq_starts: torch.Tensor,
+    dequant: bool,
+    kv_cache_layout: str,
+    total_tokens: int,
+):
+    assert kv_cache_layout in ("NHD", "SHUFFLE")
+    head_dim = key.shape[2]
+    x = 16 // key_cache.element_size()
+    assert head_dim == key_cache.shape[3], (
+        "cp_mha_gather_cache expects key_cache [num_blocks, page_size, num_heads, head_dim]"
+    )
+    page_size = key_cache.shape[1]
+    num_heads = key_cache.shape[2]
+
+    grid = (total_tokens, num_heads)
+    _cp_mha_gather_cache_kernel[grid](
+        key_cache,
+        value_cache,
+        key,
+        value,
+        block_tables,
+        cu_seqlens_kv,
+        token_to_batch,
+        seq_starts,
+        k_scales,
+        v_scales,
+        num_heads,
+        head_dim,
+        x,
+        block_tables.size(1),
+        DEQUANT=dequant,
+        PAGE_SIZE=page_size,
+        CACHE_FORMAT=kv_cache_layout,
+        BLOCK_SIZE=head_dim,
+    )
+
+
+def _flash_varlen_lse_to_merge_layout(
+    lse: torch.Tensor, num_query_heads: int
+) -> torch.Tensor:
+    if lse is None:
+        return lse
+    if lse.dim() == 2 and lse.shape[0] == num_query_heads:
+        return lse.transpose(0, 1).contiguous()
+    return lse
 
 
 class WrapperDispatch(Enum):
@@ -1948,7 +2099,10 @@ class AiterAttnBackend(AttentionBackend):
                 if self.is_multimodal:
                     extend_no_prefix = False
                 else:
-                    extend_no_prefix = not any(forward_batch.extend_prefix_lens_cpu)
+                    extend_no_prefix = (
+                        forward_batch.extend_prefix_lens_cpu is None
+                        or not any(forward_batch.extend_prefix_lens_cpu)
+                    )
                 if extend_no_prefix:
                     extend_lens = (
                         forward_batch.seq_lens - forward_batch.extend_prefix_lens
@@ -1965,15 +2119,42 @@ class AiterAttnBackend(AttentionBackend):
                 ):
                     q = q.to(dtypes.fp8)
                 max_ql = self.forward_metadata.max_q_len
-                o = flash_attn_varlen_func(
-                    q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
-                    k.contiguous().view(-1, layer.tp_k_head_num, layer.head_dim),
-                    v.contiguous().view(-1, layer.tp_v_head_num, layer.head_dim),
+                q3 = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+                k3 = k.contiguous().view(-1, layer.tp_k_head_num, layer.head_dim)
+                v3 = v.contiguous().view(-1, layer.tp_v_head_num, layer.head_dim)
+
+                has_prefix = (
+                    forward_batch.extend_prefix_lens_cpu is not None
+                    and any(forward_batch.extend_prefix_lens_cpu)
+                )
+                if not has_prefix:
+                    o = flash_attn_varlen_func(
+                        q3,
+                        k3,
+                        v3,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_k=cu_seqlens_q,
+                        max_seqlen_q=max_ql,
+                        max_seqlen_k=max_ql,
+                        min_seqlen_q=0,
+                        dropout_p=0.0,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        window_size=(-1, -1, 0),
+                        sink_ptr=None,
+                    )
+                    return o.view(-1, layer.tp_q_head_num * layer.head_dim)
+
+                # Radix prefix + pa_decode_gluon shuffle cache: same pattern as vLLM
+                # rocm_aiter_fa.extend_forward — extend self-attn, gather prefix K/V,
+                # second varlen (non-causal), merge with logsumexp.
+                suf = flash_attn_varlen_func(
+                    q3,
+                    k3,
+                    v3,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_k=cu_seqlens_q,
                     max_seqlen_q=max_ql,
-                    # K/V packed like Q (extend tokens only): per-seq K len is extend_len.
-                    # max_kv_len is for paged mha (prefix+extend); must not use it here.
                     max_seqlen_k=max_ql,
                     min_seqlen_q=0,
                     dropout_p=0.0,
@@ -1981,8 +2162,100 @@ class AiterAttnBackend(AttentionBackend):
                     causal=True,
                     window_size=(-1, -1, 0),
                     sink_ptr=None,
+                    return_lse=True,
                 )
-                return o.view(-1, layer.tp_q_head_num * layer.head_dim)
+                out_suf, lse_suf = suf if isinstance(suf, tuple) else (suf, None)
+
+                bs = forward_batch.batch_size
+                pl = forward_batch.extend_prefix_lens
+                total_pt = int(pl.sum().item())
+                if total_pt == 0:
+                    return out_suf.view(-1, layer.tp_q_head_num * layer.head_dim)
+
+                key_fetched = torch.empty(
+                    (total_pt, layer.tp_k_head_num, layer.head_dim),
+                    dtype=q3.dtype,
+                    device=q3.device,
+                )
+                value_fetched = torch.empty_like(key_fetched)
+
+                cu_seqlens_prefix = torch.zeros(
+                    bs + 1, dtype=torch.int32, device=q3.device
+                )
+                cu_seqlens_prefix[1:] = torch.cumsum(pl, dim=0)
+                token_to_batch = torch.repeat_interleave(
+                    torch.arange(bs, device=q3.device, dtype=torch.int32),
+                    pl.to(dtype=torch.long, device=q3.device),
+                )
+                seq_starts = torch.zeros(bs, dtype=torch.int32, device=q3.device)
+
+                page_size = self.page_size
+                max_pp = (int(pl.max().item()) + page_size - 1) // page_size
+                strided_pos = self.strided_indices[:max_pp].to(torch.int64)
+                pos = strided_pos.unsqueeze(0).expand(bs, -1).clone()
+                pos_clamped = torch.minimum(
+                    pos,
+                    (forward_batch.seq_lens - 1).clamp(min=0)[:, None],
+                )
+                req_idx = forward_batch.req_pool_indices[:, None]
+                slots = self.req_to_token[req_idx, pos_clamped]
+                block_table = (slots // page_size).to(torch.int32)
+
+                k_buf, v_buf = forward_batch.token_to_kv_pool.get_kv_buffer(
+                    layer.layer_id
+                )
+                num_slots = k_buf.shape[0]
+                num_blocks = num_slots // page_size
+                k_nhd = k_buf[: num_blocks * page_size].view(
+                    num_blocks, page_size, layer.tp_k_head_num, layer.head_dim
+                )
+                v_nhd = v_buf[: num_blocks * page_size].view(
+                    num_blocks, page_size, layer.tp_k_head_num, layer.head_dim
+                )
+                dequant = self.kv_cache_dtype == fp8_dtype
+                k_scales = torch.ones(1, dtype=torch.float32, device=q3.device)
+                v_scales = torch.ones(1, dtype=torch.float32, device=q3.device)
+
+                cp_mha_gather_cache(
+                    k_nhd,
+                    v_nhd,
+                    key_fetched,
+                    value_fetched,
+                    block_table,
+                    k_scales,
+                    v_scales,
+                    cu_seqlens_prefix,
+                    token_to_batch,
+                    seq_starts,
+                    dequant,
+                    "SHUFFLE",
+                    total_pt,
+                )
+
+                max_pk = int(pl.max().item())
+                pre = flash_attn_varlen_func(
+                    q3,
+                    key_fetched,
+                    value_fetched,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_prefix,
+                    max_seqlen_q=max_ql,
+                    max_seqlen_k=max_pk,
+                    min_seqlen_q=0,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                    causal=False,
+                    window_size=(-1, -1, 0),
+                    sink_ptr=None,
+                    return_lse=True,
+                )
+                out_pre, lse_pre = pre if isinstance(pre, tuple) else (pre, None)
+
+                nhq = layer.tp_q_head_num
+                lse_suf_m = _flash_varlen_lse_to_merge_layout(lse_suf, nhq)
+                lse_pre_m = _flash_varlen_lse_to_merge_layout(lse_pre, nhq)
+                merged, _ = merge_state(out_pre, lse_pre_m, out_suf, lse_suf_m)
+                return merged.view(-1, layer.tp_q_head_num * layer.head_dim)
 
             if (
                 forward_batch.forward_mode.is_target_verify()
