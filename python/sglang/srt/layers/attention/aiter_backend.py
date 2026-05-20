@@ -1814,6 +1814,14 @@ class AiterAttnBackend(AttentionBackend):
                     dtype = q.dtype
                     k_cache = k_cache.to(dtype)
                     v_cache = v_cache.to(dtype)
+                    layer_k_scale = getattr(layer, "k_scale", None)
+                    layer_v_scale = getattr(layer, "v_scale", None)
+                    k_cache = k_cache * (
+                        layer_k_scale if layer_k_scale is not None else self.k_scale
+                    )
+                    v_cache = v_cache * (
+                        layer_v_scale if layer_v_scale is not None else self.v_scale
+                    )
                 ragged_kv_cache_dtype = "auto"
                 ragged_k_scale = self.k_scale
                 ragged_v_scale = self.v_scale
