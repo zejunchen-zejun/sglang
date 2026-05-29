@@ -4,6 +4,7 @@
 # Adapted from vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/layers/linear.py
 
 from abc import abstractmethod
+from fnmatch import fnmatch
 
 import torch
 import torch.distributed as dist
@@ -49,6 +50,7 @@ from sglang.srt.utils import (
     is_cpu,
     is_hip
 )
+from sglang.srt.environ import envs
 
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_hip = is_hip()
@@ -59,6 +61,46 @@ if _use_aiter:
     from aiter.ops.shuffle import shuffle_weight
 
 logger = init_logger(__name__)
+
+_qwen_image_a8w8_hipb_initialized = False
+_QWEN_IMAGE_A8W8_OUTPROJ_BF16_BLOCKS = set(range(56, 60))
+_QWEN_IMAGE_A8W8_DEFAULT_PATTERNS = [
+    "transformer_blocks.*.attn.to_qkv",
+    "transformer_blocks.*.attn.to_added_qkv",
+    "transformer_blocks.*.attn.to_q",
+    "transformer_blocks.*.attn.to_k",
+    "transformer_blocks.*.attn.to_v",
+    "transformer_blocks.*.attn.add_q_proj",
+    "transformer_blocks.*.attn.add_k_proj",
+    "transformer_blocks.*.attn.add_v_proj",
+    "transformer_blocks.*.img_mlp.*",
+    "transformer_blocks.*.txt_mlp.*",
+    *[
+        f"transformer_blocks.{i}.attn.to_out.0"
+        for i in range(60)
+        if i not in _QWEN_IMAGE_A8W8_OUTPROJ_BF16_BLOCKS
+    ],
+    *[
+        f"transformer_blocks.{i}.attn.to_add_out"
+        for i in range(60)
+        if i not in _QWEN_IMAGE_A8W8_OUTPROJ_BF16_BLOCKS
+    ],
+]
+
+
+def _qwen_image_a8w8_patterns() -> list[str]:
+    spec = envs.SGLANG_QWEN_IMAGE_A8W8_GEMM_PATTERNS.get()
+    if spec:
+        return [pattern.strip() for pattern in spec.split(",") if pattern.strip()]
+    return _QWEN_IMAGE_A8W8_DEFAULT_PATTERNS
+
+
+def _use_qwen_image_a8w8_gemm(prefix: str) -> bool:
+    return (
+        _is_hip
+        and envs.SGLANG_QWEN_IMAGE_A8W8_GEMM.get()
+        and any(fnmatch(prefix, pattern) for pattern in _qwen_image_a8w8_patterns())
+    )
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
@@ -173,6 +215,55 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if _is_cpu and _is_cpu_amx_available:
             _amx_process_weight_after_loading(layer, ["weight"])
 
+        if _use_qwen_image_a8w8_gemm(getattr(layer, "prefix", "")):
+            try:
+                global _qwen_image_a8w8_hipb_initialized
+                import aiter
+                from aiter.ops.shuffle import shuffle_weight
+
+                layout = (16, 16)
+                old_weight = layer.weight
+                weight = old_weight.detach()
+                if not AiterHipblaslt.can_shuffle(
+                    weight.shape[0], weight.shape[1], layout
+                ):
+                    logger.warning(
+                        "Skipping Qwen-Image A8W8 bpreshuffle GEMM for %s: "
+                        "unsupported weight shape %s",
+                        layer.prefix,
+                        tuple(weight.shape),
+                    )
+                    self._qwen_image_a8w8_gemm = False
+                    return
+
+                if (
+                    not _qwen_image_a8w8_hipb_initialized
+                    and hasattr(aiter, "hipb_create_extension")
+                ):
+                    aiter.hipb_create_extension()
+                    _qwen_image_a8w8_hipb_initialized = True
+                weight_q, weight_scale = aiter.pertoken_quant(
+                    weight.contiguous(), quant_dtype=aiter.dtypes.fp8
+                )
+                layer.weight = Parameter(
+                    shuffle_weight(weight_q, layout).contiguous(), requires_grad=False
+                )
+                layer.register_buffer(
+                    "weight_scale", weight_scale.contiguous(), persistent=False
+                )
+                self._qwen_image_a8w8_gemm = True
+                del old_weight, weight, weight_q, weight_scale
+                torch.cuda.empty_cache()
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Skipping Qwen-Image A8W8 bpreshuffle GEMM for %s: %s",
+                    getattr(layer, "prefix", ""),
+                    exc,
+                )
+                self._qwen_image_a8w8_gemm = False
+                return
+
         if _use_aiter and get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE"):
             AiterHipblaslt._initialize_hipblaslt()
             layout = (16, 16)
@@ -192,6 +283,24 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def apply(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if getattr(self, "_qwen_image_a8w8_gemm", False):
+            import aiter
+
+            orig_shape = x.shape
+            x_2d = x.reshape(-1, x.size(-1)).contiguous()
+            x_q, x_scale = aiter.pertoken_quant(x_2d, quant_dtype=aiter.dtypes.fp8)
+            output = aiter.gemm_a8w8_bpreshuffle(
+                x_q,
+                layer.weight,
+                x_scale.contiguous(),
+                layer.weight_scale,
+                None,
+                x.dtype,
+            )
+            if bias is not None:
+                output = output + bias
+            return output.view(*orig_shape[:-1], layer.weight.shape[0])
+
         if (
             _use_aiter
             and get_bool_env_var("SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE")

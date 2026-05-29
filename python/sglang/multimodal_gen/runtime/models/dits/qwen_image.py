@@ -58,6 +58,11 @@ except Exception:
 logger = init_logger(__name__)  # pylint: disable=invalid-name
 _is_cuda = current_platform.is_cuda()
 
+
+def _qwen_image_use_fused_qkv() -> bool:
+    return envs.SGLANG_QWEN_IMAGE_FUSED_QKV.get()
+
+
 try:
     from nunchaku.models.attention import NunchakuFeedForward  # type: ignore[import]
 except Exception:
@@ -594,7 +599,9 @@ class QwenImageCrossAttention(nn.Module):
         self.added_kv_proj_dim = added_kv_proj_dim
         self.prefix = prefix
 
-        self.use_fused_qkv = isinstance(quant_config, NunchakuConfig)
+        self.use_fused_qkv = isinstance(quant_config, NunchakuConfig) or (
+            quant_config is None and _qwen_image_use_fused_qkv()
+        )
 
         self.inner_dim = out_dim if out_dim is not None else head_dim * num_heads
         self.inner_kv_dim = self.inner_dim
@@ -637,7 +644,9 @@ class QwenImageCrossAttention(nn.Module):
             self.norm_k = RMSNorm(head_dim, eps=eps) if qk_norm else nn.Identity()
 
         if added_kv_proj_dim is not None:
-            self.use_fused_added_qkv = isinstance(quant_config, NunchakuConfig)
+            self.use_fused_added_qkv = isinstance(quant_config, NunchakuConfig) or (
+                quant_config is None and _qwen_image_use_fused_qkv()
+            )
             if self.use_fused_added_qkv:
                 self.to_added_qkv = MergedColumnParallelLinear(
                     added_kv_proj_dim,
@@ -1209,6 +1218,42 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         self.zero_cond_t = getattr(config.arch_config, "zero_cond_t", False)
         self.out_channels = out_channels or in_channels
         self.inner_dim = num_attention_heads * attention_head_dim
+        self.param_names_mapping = dict(self.param_names_mapping)
+        if quant_config is None and _qwen_image_use_fused_qkv():
+            self.param_names_mapping.update(
+                {
+                    r"^(transformer_blocks\.\d+\.attn\.)to_q\.(.+)$": (
+                        r"\1to_qkv.\2",
+                        0,
+                        3,
+                    ),
+                    r"^(transformer_blocks\.\d+\.attn\.)to_k\.(.+)$": (
+                        r"\1to_qkv.\2",
+                        1,
+                        3,
+                    ),
+                    r"^(transformer_blocks\.\d+\.attn\.)to_v\.(.+)$": (
+                        r"\1to_qkv.\2",
+                        2,
+                        3,
+                    ),
+                    r"^(transformer_blocks\.\d+\.attn\.)add_q_proj\.(.+)$": (
+                        r"\1to_added_qkv.\2",
+                        0,
+                        3,
+                    ),
+                    r"^(transformer_blocks\.\d+\.attn\.)add_k_proj\.(.+)$": (
+                        r"\1to_added_qkv.\2",
+                        1,
+                        3,
+                    ),
+                    r"^(transformer_blocks\.\d+\.attn\.)add_v_proj\.(.+)$": (
+                        r"\1to_added_qkv.\2",
+                        2,
+                        3,
+                    ),
+                }
+            )
 
         self.use_additional_t_cond: bool = getattr(
             config.arch_config, "use_additional_t_cond", False
