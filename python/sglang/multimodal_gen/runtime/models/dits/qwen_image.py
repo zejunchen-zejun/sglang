@@ -19,7 +19,10 @@ from sglang.jit_kernel.diffusion.triton.scale_shift import (
     fuse_scale_shift_gate_select01_kernel,
 )
 from sglang.multimodal_gen.configs.models.dits.qwenimage import QwenImageDitConfig
-from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.distributed import (
+    get_local_torch_device,
+    get_sp_world_size,
+)
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
 from sglang.multimodal_gen.runtime.layers.elementwise import MulAdd
 from sglang.multimodal_gen.runtime.layers.layernorm import (
@@ -57,6 +60,114 @@ except Exception:
 
 logger = init_logger(__name__)  # pylint: disable=invalid-name
 _is_cuda = current_platform.is_cuda()
+
+
+def _parse_layer_set(spec: str | None) -> set[int]:
+    layers: set[int] = set()
+    if not spec:
+        return layers
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            layers.update(range(int(start), int(end) + 1))
+        else:
+            layers.add(int(part))
+    return layers
+
+
+def _layer_idx_from_prefix(prefix: str) -> int:
+    marker = "transformer_blocks."
+    if marker not in prefix:
+        return -1
+    suffix = prefix.split(marker, 1)[1]
+    layer_str = suffix.split(".", 1)[0]
+    return int(layer_str) if layer_str.isdigit() else -1
+
+
+def _qwen_image_bf16_attention_layers() -> set[int]:
+    return _parse_layer_set(envs.SGLANG_QWEN_IMAGE_BF16_ATTN_LAYERS.get())
+
+
+def _qwen_image_fp8_attention_mode() -> int:
+    mode = envs.SGLANG_QWEN_IMAGE_FP8_ATTN_MODE.get()
+    if mode not in (-1, 0, 1):
+        logger.warning(
+            "Invalid SGLANG_QWEN_IMAGE_FP8_ATTN_MODE=%r; using -1. "
+            "Valid values are: -1 disabled, 0 per-tensor, 1 per-head.",
+            mode,
+        )
+        return -1
+    return mode
+
+
+def _qwen_image_use_fp8_attention(layer_idx: int, mode: int) -> bool:
+    return (
+        mode >= 0
+        and aiter is not None
+        and layer_idx >= 0
+        and layer_idx not in _qwen_image_bf16_attention_layers()
+    )
+
+
+def _aiter_fp8_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    softmax_scale: float | None = None,
+) -> torch.Tensor:
+    query_fp8, query_scale = aiter.per_tensor_quant(
+        query.contiguous(), quant_dtype=aiter.dtypes.fp8
+    )
+    key_fp8, key_scale = aiter.per_tensor_quant(
+        key.contiguous(), quant_dtype=aiter.dtypes.fp8
+    )
+    value_fp8, value_scale = aiter.per_tensor_quant(
+        value.contiguous(), quant_dtype=aiter.dtypes.fp8
+    )
+    return aiter.flash_attn_fp8_pertensor_func(
+        query_fp8,
+        key_fp8,
+        value_fp8,
+        query_scale,
+        key_scale,
+        value_scale,
+        causal=False,
+        softmax_scale=softmax_scale,
+    )
+
+
+def _aiter_fp8_attention_with_qk_fp8(
+    query_fp8: torch.Tensor,
+    key_fp8: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    txt_value: torch.Tensor,
+    img_value: torch.Tensor,
+    softmax_scale: float | None = None,
+) -> torch.Tensor:
+    if hasattr(aiter, "v_2way_per_head_fp8_quant"):
+        value_fp8, value_scale = aiter.v_2way_per_head_fp8_quant(
+            txt_value.contiguous(), img_value.contiguous()
+        )
+    else:
+        joint_value = torch.cat([txt_value, img_value], dim=1)
+        value_fp8, value_scale = aiter.per_tensor_quant(
+            joint_value.contiguous(), quant_dtype=aiter.dtypes.fp8
+        )
+    return aiter.flash_attn_fp8_pertensor_func(
+        query_fp8,
+        key_fp8,
+        value_fp8,
+        q_descale,
+        k_descale,
+        value_scale,
+        causal=False,
+        softmax_scale=softmax_scale,
+    )
+
 
 try:
     from nunchaku.models.attention import NunchakuFeedForward  # type: ignore[import]
@@ -593,6 +704,8 @@ class QwenImageCrossAttention(nn.Module):
         self.parallel_attention = parallel_attention
         self.added_kv_proj_dim = added_kv_proj_dim
         self.prefix = prefix
+        self.layer_idx = _layer_idx_from_prefix(prefix)
+        self._fp8_attention_fallback_warned = False
 
         self.use_fused_qkv = isinstance(quant_config, NunchakuConfig)
 
@@ -738,6 +851,24 @@ class QwenImageCrossAttention(nn.Module):
         txt_key = txt_key.unflatten(-1, (self.num_heads, -1))
         txt_value = txt_value.unflatten(-1, (self.num_heads, -1))
 
+        fp8_attention_mode = _qwen_image_fp8_attention_mode()
+        base_fp8_attention = (
+            _qwen_image_use_fp8_attention(self.layer_idx, fp8_attention_mode)
+            and get_sp_world_size() == 1
+            and hasattr(aiter, "flash_attn_fp8_pertensor_func")
+        )
+        use_perhead_fp8_attention = (
+            base_fp8_attention
+            and fp8_attention_mode == 1
+            and hasattr(aiter, "fused_qk_norm_rope_2way_fp8_perhead_quant")
+            and hasattr(aiter, "v_2way_per_head_fp8_quant")
+        )
+        use_pertensor_fp8_attention = base_fp8_attention and fp8_attention_mode == 0
+        joint_query_fp8 = None
+        joint_key_fp8 = None
+        joint_q_descale = None
+        joint_k_descale = None
+
         use_fused_rope_rms = (
             envs.SGLANG_ENABLE_FUSED_ROPE_RMS_2WAY.get()
             and aiter is not None
@@ -768,29 +899,59 @@ class QwenImageCrossAttention(nn.Module):
                 dtype=img_key.dtype,
                 device=img_key.device,
             )
-            joint_value = torch.cat([txt_value, img_value], dim=1)
-            aiter.fused_qk_norm_rope_2way(
-                txt_query.contiguous(),
-                txt_key.contiguous(),
-                img_query.contiguous(),
-                img_key.contiguous(),
-                self.norm_added_q.weight,
-                self.norm_added_k.weight,
-                self.norm_q.weight,
-                self.norm_k.weight,
-                txt_cos_sin,
-                img_cos_sin,
-                batch_size,
-                seq_len_txt,
-                seq_len_img,
-                num_heads_q,
-                num_heads_k,
-                head_size,
-                True,
-                self.eps,
-                joint_query,
-                joint_key,
-            )
+            joint_value = None
+            if use_perhead_fp8_attention:
+                (
+                    joint_query_fp8,
+                    joint_key_fp8,
+                    joint_q_descale,
+                    joint_k_descale,
+                    joint_query,
+                    joint_key,
+                ) = aiter.fused_qk_norm_rope_2way_fp8_perhead_quant(
+                    txt_query.contiguous(),
+                    txt_key.contiguous(),
+                    img_query.contiguous(),
+                    img_key.contiguous(),
+                    self.norm_added_q.weight,
+                    self.norm_added_k.weight,
+                    self.norm_q.weight,
+                    self.norm_k.weight,
+                    txt_cos_sin,
+                    img_cos_sin,
+                    batch_size,
+                    seq_len_txt,
+                    seq_len_img,
+                    num_heads_q,
+                    num_heads_k,
+                    head_size,
+                    True,
+                    self.eps,
+                )
+            else:
+                joint_value = torch.cat([txt_value, img_value], dim=1)
+                aiter.fused_qk_norm_rope_2way(
+                    txt_query.contiguous(),
+                    txt_key.contiguous(),
+                    img_query.contiguous(),
+                    img_key.contiguous(),
+                    self.norm_added_q.weight,
+                    self.norm_added_k.weight,
+                    self.norm_q.weight,
+                    self.norm_k.weight,
+                    txt_cos_sin,
+                    img_cos_sin,
+                    batch_size,
+                    seq_len_txt,
+                    seq_len_img,
+                    num_heads_q,
+                    num_heads_k,
+                    head_size,
+                    True,
+                    self.eps,
+                    joint_query,
+                    joint_key,
+                )
         else:
             if self.norm_q is not None:
                 img_query = self.norm_q(img_query)
@@ -823,11 +984,48 @@ class QwenImageCrossAttention(nn.Module):
             joint_value = torch.cat([txt_value, img_value], dim=1)
 
         # Compute joint attention
-        joint_hidden_states = self.attn(
-            joint_query,
-            joint_key,
-            joint_value,
-        )
+        use_fp8_attention = use_pertensor_fp8_attention or joint_query_fp8 is not None
+        if use_fp8_attention:
+            try:
+                if joint_query_fp8 is not None:
+                    joint_hidden_states = _aiter_fp8_attention_with_qk_fp8(
+                        joint_query_fp8,
+                        joint_key_fp8,
+                        joint_q_descale,
+                        joint_k_descale,
+                        txt_value,
+                        img_value,
+                        softmax_scale=self.attn.softmax_scale,
+                    )
+                else:
+                    if joint_value is None:
+                        joint_value = torch.cat([txt_value, img_value], dim=1)
+                    joint_hidden_states = _aiter_fp8_attention(
+                        joint_query,
+                        joint_key,
+                        joint_value,
+                        softmax_scale=self.attn.softmax_scale,
+                    )
+            except Exception as exc:
+                if not self._fp8_attention_fallback_warned:
+                    logger.warning(
+                        "Qwen-Image FP8 attention failed on layer %s; falling back "
+                        "to BF16 attention: %s",
+                        self.layer_idx,
+                        exc,
+                    )
+                    self._fp8_attention_fallback_warned = True
+                if joint_value is None:
+                    joint_value = torch.cat([txt_value, img_value], dim=1)
+                joint_hidden_states = self.attn(joint_query, joint_key, joint_value)
+        else:
+            if joint_value is None:
+                joint_value = torch.cat([txt_value, img_value], dim=1)
+            joint_hidden_states = self.attn(
+                joint_query,
+                joint_key,
+                joint_value,
+            )
 
         # Reshape back
         joint_hidden_states = joint_hidden_states.flatten(2, 3)

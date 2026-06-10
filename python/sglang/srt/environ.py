@@ -305,6 +305,9 @@ class Envs:
     SGLANG_USE_AITER_FA_ROUND_MODE = EnvBool(False)
     SGLANG_ENABLE_FUSED_ROPE_RMS_2WAY = EnvBool(False)
     SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE = EnvBool(False)
+    # Qwen-Image FP8 attention mode: -1=disabled, 0=per-tensor, 1=per-(batch, head).
+    SGLANG_QWEN_IMAGE_FP8_ATTN_MODE = EnvInt(-1)
+    SGLANG_QWEN_IMAGE_BF16_ATTN_LAYERS = EnvStr("0,42,47,57-59")
 
     # NPU
     SGLANG_NPU_DISABLE_ACL_FORMAT_WEIGHT = EnvBool(False)
