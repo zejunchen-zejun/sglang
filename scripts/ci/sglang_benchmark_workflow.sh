@@ -19,16 +19,25 @@ BENCHMARK_EXAMPLE_ROOT=${SGLANG_BENCHMARK_EXAMPLE_ROOT:-/models/benchamark_examp
 
 export SGLANG_DISABLE_CUDNN_CHECK=1
 export SGLANG_USE_CUDA_IPC_TRANSPORT=1
-# Override to 0 for Ali-specific runs when required.
 export SGLANG_VLM_CACHE_SIZE_MB="${SGLANG_VLM_CACHE_SIZE_MB:-8192}"
 export SGLANG_USE_AITER=1
 export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=1
 export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=1
 export SGLANG_USE_AITER_NEW_CA=false
+export USE_HIP_LINEAR_ATTN="${USE_HIP_LINEAR_ATTN:-1}"
+export SGLANG_USE_IPC_POOL_HANDLE_CACHE="${SGLANG_USE_IPC_POOL_HANDLE_CACHE:-1}"
+export HIP_GDN_SORT_IDX_BS="${HIP_GDN_SORT_IDX_BS:-32768}"
 
-if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
-  export AITER_MOE_PADDING_SIZE="${AITER_MOE_PADDING_SIZE:-256}"
+# Model-specific aiter tuning (from the validated launch references).
+if [[ "${MODEL_NAME}" == "Qwen3.5-27B-PTPC-compressor" ]]; then
+  export AITER_QUICK_REDUCE_QUANTIZATION="${AITER_QUICK_REDUCE_QUANTIZATION:-INT8}"
+  export SGLANG_DISABLE_AITER_FUSED_AR_RMSNORM="${SGLANG_DISABLE_AITER_FUSED_AR_RMSNORM:-1}"
+elif [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+  export AITER_QUICK_REDUCE_QUANTIZATION="${AITER_QUICK_REDUCE_QUANTIZATION:-INT6}"
+  export USE_AITER_COMM="${USE_AITER_COMM:-1}"
 fi
+# Fallback quick-reduce level for any other model.
+export AITER_QUICK_REDUCE_QUANTIZATION="${AITER_QUICK_REDUCE_QUANTIZATION:-INT6}"
 
 echo "Detect TYPE: ${TYPE}"
 echo "Detect model_name: ${MODEL_NAME}"
@@ -82,8 +91,15 @@ print_launch_recipe() {
   echo "export SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE=${SGLANG_ROCM_USE_AITER_LINEAR_SHUFFLE}"
   echo "export SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB=${SGLANG_ROCM_USE_AITER_LINEAR_FP8HIPB}"
   echo "export SGLANG_USE_AITER_NEW_CA=${SGLANG_USE_AITER_NEW_CA}"
-  if [[ -n "${AITER_MOE_PADDING_SIZE:-}" ]]; then
-    echo "export AITER_MOE_PADDING_SIZE=${AITER_MOE_PADDING_SIZE}"
+  echo "export USE_HIP_LINEAR_ATTN=${USE_HIP_LINEAR_ATTN}"
+  echo "export SGLANG_USE_IPC_POOL_HANDLE_CACHE=${SGLANG_USE_IPC_POOL_HANDLE_CACHE}"
+  echo "export HIP_GDN_SORT_IDX_BS=${HIP_GDN_SORT_IDX_BS}"
+  echo "export AITER_QUICK_REDUCE_QUANTIZATION=${AITER_QUICK_REDUCE_QUANTIZATION}"
+  if [[ -n "${USE_AITER_COMM:-}" ]]; then
+    echo "export USE_AITER_COMM=${USE_AITER_COMM}"
+  fi
+  if [[ -n "${SGLANG_DISABLE_AITER_FUSED_AR_RMSNORM:-}" ]]; then
+    echo "export SGLANG_DISABLE_AITER_FUSED_AR_RMSNORM=${SGLANG_DISABLE_AITER_FUSED_AR_RMSNORM}"
   fi
 
   echo
@@ -102,13 +118,15 @@ nohup python3 -m sglang.launch_server \\
   --mem-fraction-static 0.9 \\
   --max-prefill-tokens 32768 \\
   --max-running-requests 128 \\
+  --cuda-graph-max-bs 128 \\
+  --kv-cache-dtype fp8_e4m3 \\
+  --disable-radix-cache \\
+  --mm-attention-backend aiter_attn \\
 EOF
-  if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+  if [[ "${MODEL_NAME}" == "Qwen3.5-27B-PTPC-compressor" ]]; then
     echo "  --disable-custom-all-reduce \\"
   fi
   cat <<EOF
-  --disable-radix-cache \\
-  --mm-attention-backend aiter_attn \\
   > ${SERVER_LOG} 2>&1 &
 EOF
 }
@@ -390,9 +408,6 @@ if [[ "${TYPE}" == "launch" ]]; then
   rm -f "${SERVER_LOG}"
   model="${MODEL_PATH}"
   attention_backend="aiter"
-  if [[ "${MODEL_NAME}" == "Qwen3.5-27B-PTPC-compressor" ]]; then
-    attention_backend="triton"
-  fi
 
   launch_args=(
     --port "${PORT}"
@@ -407,11 +422,15 @@ if [[ "${TYPE}" == "launch" ]]; then
     --mem-fraction-static 0.9
     --max-prefill-tokens 32768
     --max-running-requests 128
+    --cuda-graph-max-bs 128
+    --kv-cache-dtype fp8_e4m3
     --disable-radix-cache
     --mm-attention-backend aiter_attn
   )
 
-  if [[ "${MODEL_NAME}" == "offical_qwen3p5_397B_ptpc" ]]; then
+  # 27B disables the aiter custom all-reduce (paired with
+  # SGLANG_DISABLE_AITER_FUSED_AR_RMSNORM=1 above); 397B keeps it.
+  if [[ "${MODEL_NAME}" == "Qwen3.5-27B-PTPC-compressor" ]]; then
     launch_args+=(--disable-custom-all-reduce)
   fi
 
